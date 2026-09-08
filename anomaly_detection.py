@@ -480,7 +480,6 @@ if __name__ == "__main__":
         os.path.join(current_dir, "engine_telemetry.csv"),
         os.path.join(current_dir, "data", "engine_telemetry.csv"),
         os.path.join(os.getcwd(), "engine_telemetry.csv"),
-        "c:/Users/ACER/OneDrive/Documents/SIH/engine_telemetry.csv",
     ]
     data_file = None
     for cand in candidates:

@@ -145,7 +145,10 @@ def simulate_mission(df_mission, rng):
 
 
 if __name__ == "__main__":
-    climate_df = pd.read_csv("/home/claude/dt_project/climate_dataset.csv")
+    import os
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    climate_csv_path = os.path.join(current_dir, "climate_dataset.csv")
+    climate_df = pd.read_csv(climate_csv_path)
     rng_master = np.random.default_rng(7)
 
     all_engine = []
@@ -161,7 +164,7 @@ if __name__ == "__main__":
         engine_full.groupby("mission_id")["CHT_C"].diff().fillna(0)
     ).round(3)
 
-    out_path = "/home/claude/dt_project/engine_telemetry.csv"
+    out_path = os.path.join(current_dir, "engine_telemetry.csv")
     engine_full.to_csv(out_path, index=False)
 
     print(f"Generated engine telemetry: {len(engine_full)} rows across {climate_df['mission_id'].nunique()} missions")

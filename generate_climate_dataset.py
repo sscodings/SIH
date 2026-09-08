@@ -200,8 +200,8 @@ if __name__ == "__main__":
         df = generate_mission(mission_id=i, rng=mission_rng)
         all_missions.append(df)
 
-    full_df = pd.concat(all_missions, ignore_index=True)
-    out_path = "/home/claude/dt_project/climate_dataset.csv"
+    import os
+    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "climate_dataset.csv")
     full_df.to_csv(out_path, index=False)
 
     print(f"Generated {N_MISSIONS} missions, {len(full_df)} total rows")
