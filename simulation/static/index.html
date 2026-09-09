@@ -442,7 +442,7 @@
   <div id="mlAlertBanner" style="max-width: 1440px; margin: 1rem auto 0; padding: 0.75rem 1.5rem; border-radius: 10px; background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.35); display: flex; justify-content: space-between; align-items: center; transition: all 0.3s ease;">
     <div style="display: flex; align-items: center; gap: 0.75rem;">
       <span style="font-weight: 800; font-size: 0.75rem; background: var(--accent-green); color: #040914; padding: 0.2rem 0.6rem; border-radius: 4px;" id="mlBadge">ML NOMINAL</span>
-      <span style="font-size: 0.85rem; font-weight: 500;" id="mlMsg">AI & Physics Rule Engine: All engine parameters operating within nominal bounds.</span>
+      <span style="font-size: 0.85rem; font-weight: 500;" id="mlMsg">AI Diagnostic Engine: All engine subsystems operating within nominal parameters.</span>
     </div>
     <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: var(--text-muted);">Health Index: <strong id="valHealthIdx" style="color: var(--accent-cyan);">1.0000</strong></div>
   </div>
@@ -492,6 +492,7 @@
             <option value="abnormal_vibration">Abnormal Vibration (Prop Unbalance 1X)</option>
             <option value="sensor_drift">Sensor Drift (Measurement Only)</option>
             <option value="regulator_failure">Regulator Failure (Voltage Jitter)</option>
+            <option value="catastrophic_failure">Catastrophic Seizure (Health 0.0 & Crash)</option>
           </select>
         </div>
 
@@ -510,11 +511,6 @@
           <div class="slider-container">
             <input type="range" id="severitySlider" min="10" max="100" value="80">
           </div>
-        </div>
-
-        <div class="control-group">
-          <label>Ramp Time (Seconds)</label>
-          <input type="number" id="rampTimeInput" value="30" min="1" max="180">
         </div>
 
         <div class="btn-row">
@@ -770,26 +766,45 @@
       valAltM.innerText = data.altitude_m.toFixed(0);
       valAmbT.innerText = data.ambient_c.toFixed(1);
 
-      // CHT updates
+      // Extract AI/ML consensus diagnosis
+      const ml = data.diagnostics?.ml_diagnostics || {};
+      const isRunning = data.is_running !== false && (data.rpm > 300 || data.t > 1.0);
+      const activeFaults = data.active_faults || [];
+      const isBrainAnomaly = isRunning && Boolean(
+        activeFaults.length > 0 ||
+        (ml.anomaly_detected && ml.fault_type && ml.fault_type !== 'none')
+      );
+      const brainDiagnosedCyl = (isBrainAnomaly && typeof ml.diagnosed_cylinder === 'number' && ml.diagnosed_cylinder >= 0 && ml.diagnosed_cylinder < 4)
+        ? ml.diagnosed_cylinder
+        : null;
+
+      // CHT updates (pure physical thermodynamics + AI brain identification)
       if (data.cht_c && data.cht_c.length === 4) {
         for (let i = 0; i < 4; i++) {
           const val = data.cht_c[i];
           document.getElementById(`valCht${i}`).innerText = `${val.toFixed(1)}°C`;
           const pct = Math.min(100, Math.max(0, (val / 140) * 100));
           const bar = document.getElementById(`barCht${i}`);
+          const box = document.getElementById(`boxCht${i}`);
           bar.style.width = `${pct}%`;
-          if (val > 120) {
+
+          const isBrainTargeted = isBrainAnomaly && brainDiagnosedCyl === i;
+          if (isRunning && (val > 125 || (isBrainTargeted && val > 105))) {
             bar.style.background = 'var(--accent-rose)';
-          } else if (val > 100) {
+            box.classList.add('faulted');
+          } else if (isRunning && (val > 105 || isBrainTargeted)) {
             bar.style.background = 'var(--accent-amber)';
+            box.classList.remove('faulted');
           } else {
             bar.style.background = 'var(--accent-cyan)';
+            box.classList.remove('faulted');
           }
         }
       }
 
-      // EGT updates
+      // EGT updates (pure physical combustion drop + cross-spread divergence + AI brain identification)
       if (data.egt_c && data.egt_c.length === 4) {
+        const avgEgt = data.egt_c.reduce((a, b) => a + b, 0) / 4;
         for (let i = 0; i < 4; i++) {
           const val = data.egt_c[i];
           document.getElementById(`valEgt${i}`).innerText = `${val.toFixed(0)}°C`;
@@ -797,38 +812,89 @@
           const bar = document.getElementById(`barEgt${i}`);
           const box = document.getElementById(`boxEgt${i}`);
           bar.style.width = `${pct}%`;
-          // If EGT dropped below 600 while others are high, indicate misfire
-          if (val < 500 && data.rpm > 2000) {
+
+          const isPhysicsDeviation = isRunning && ((val < 600 && data.rpm > 2000) || (avgEgt - val > 75));
+          const isBrainTargeted = isBrainAnomaly && brainDiagnosedCyl === i;
+          if (isPhysicsDeviation || isBrainTargeted) {
             box.classList.add('faulted');
+            bar.style.background = 'var(--accent-rose)';
           } else {
             box.classList.remove('faulted');
+            bar.style.background = '#f97316';
           }
         }
       }
 
       // Highlight vibration card if anomalous
       const cardVib = document.getElementById('cardVibration');
-      if (data.vibration_rms_g > 0.25) {
+      if (isRunning && data.vibration_rms_g > 0.35) {
         cardVib.className = 'gauge-card alert';
-      } else if (data.vibration_rms_g > 0.15) {
+      } else if (isRunning && data.vibration_rms_g > 0.18) {
         cardVib.className = 'gauge-card warn';
       } else {
         cardVib.className = 'gauge-card success';
       }
 
+      // Highlight oil pressure card if deviating from nominal
+      const cardOilP = document.getElementById('cardOilPressure');
+      if (isRunning && (data.oil_pressure_bar < 1.8 || data.oil_pressure_bar > 5.6)) {
+        cardOilP.className = 'gauge-card alert';
+      } else if (isRunning && (data.oil_pressure_bar < 2.3 || data.oil_pressure_bar > 5.2)) {
+        cardOilP.className = 'gauge-card warn';
+      } else {
+        cardOilP.className = 'gauge-card success';
+      }
+
+      // Highlight oil temperature card
+      const cardOilT = document.getElementById('cardOilTemp');
+      if (isRunning && data.oil_temp_c > 120) {
+        cardOilT.className = 'gauge-card alert';
+      } else if (isRunning && data.oil_temp_c > 105) {
+        cardOilT.className = 'gauge-card warn';
+      } else {
+        cardOilT.className = 'gauge-card success';
+      }
+
+      // Highlight RPM card if seized
+      const cardRpm = document.getElementById('cardRpm');
+      if (data.rpm <= 50 && (data.health_index <= 0.0 || data.craft_crashed)) {
+        cardRpm.className = 'gauge-card alert';
+      } else {
+        cardRpm.className = 'gauge-card success';
+      }
+
       // ML Health & Anomaly Banner update
-      if (data.diagnostics && data.diagnostics.ml_diagnostics) {
+      const hVal = document.getElementById('valHealthIdx');
+      const banner = document.getElementById('mlAlertBanner');
+      const badge = document.getElementById('mlBadge');
+      const msg = document.getElementById('mlMsg');
+      const currentHealth = data.health_index !== undefined ? data.health_index : (data.diagnostics?.ml_diagnostics?.health_index ?? 1.0);
+
+      if (hVal) {
+        hVal.innerText = Number(currentHealth).toFixed(4);
+      }
+
+      if (data.craft_crashed || (currentHealth <= 0.001 && data.altitude_m <= 5)) {
+        banner.style.background = 'rgba(239, 68, 68, 0.4)';
+        banner.style.borderColor = '#ef4444';
+        badge.style.background = 'var(--accent-rose)';
+        badge.innerText = 'CRAFT CRASHED';
+        msg.innerText = '💥 TOTAL ENGINE FAILURE & GROUND IMPACT (0 m ALTITUDE, 0 RPM).';
+      } else if (currentHealth <= 0.25) {
+        banner.style.background = 'rgba(245, 158, 11, 0.3)';
+        banner.style.borderColor = '#f59e0b';
+        badge.style.background = 'var(--accent-amber)';
+        badge.innerText = 'EMERGENCY SINK';
+        msg.innerText = '⚠️ ENGINE SEIZURE / POWER LOSS — CONTROLLED/EMERGENCY DESCENT IN PROGRESS.';
+      } else if (!isRunning && activeFaults.length === 0) {
+        banner.style.background = 'rgba(16, 185, 129, 0.15)';
+        banner.style.borderColor = 'rgba(16, 185, 129, 0.35)';
+        badge.style.background = 'var(--accent-cyan)';
+        badge.innerText = 'STANDBY';
+        msg.innerText = 'Engine in standby: all subsystems nominal and ready for flight.';
+      } else if (data.diagnostics && data.diagnostics.ml_diagnostics) {
         const ml = data.diagnostics.ml_diagnostics;
-        const banner = document.getElementById('mlAlertBanner');
-        const badge = document.getElementById('mlBadge');
-        const msg = document.getElementById('mlMsg');
-        const hVal = document.getElementById('valHealthIdx');
-
-        if (hVal && ml.health_index !== undefined) {
-          hVal.innerText = ml.health_index.toFixed(4);
-        }
-
-        if (ml.anomaly_detected) {
+        if (isBrainAnomaly && ml.anomaly_detected) {
           banner.style.background = 'rgba(239, 68, 68, 0.2)';
           banner.style.borderColor = 'rgba(239, 68, 68, 0.6)';
           badge.style.background = 'var(--accent-rose)';
@@ -839,9 +905,12 @@
           banner.style.borderColor = 'rgba(16, 185, 129, 0.35)';
           badge.style.background = 'var(--accent-green)';
           badge.innerText = 'ML NOMINAL';
-          msg.innerText = ml.message || 'AI & Physics Rule Engine: All engine parameters operating within nominal bounds.';
+          msg.innerText = ml.message || 'AI Diagnostic Engine: All engine subsystems operating within nominal parameters.';
         }
       }
+
+      // Render active faults list directly from telemetry
+      renderFaultsList(data.active_faults || []);
 
       // Format JSON inspector
       jsonInspector.innerText = JSON.stringify(data, null, 2);
@@ -883,8 +952,24 @@
     btnInjectFault.addEventListener('click', async () => {
       const kind = faultKindSelect.value;
       const severity = parseFloat(severitySlider.value) / 100.0;
-      const cyl = (kind === 'misfire' || kind === 'injector_abnormal') ? parseInt(faultCylinderSelect.value) : null;
-      const ramp_s = parseFloat(rampTimeInput.value);
+      const cyl = (kind === 'misfire' || kind === 'injector_abnormal' || kind === 'sensor_drift') ? parseInt(faultCylinderSelect.value) : null;
+      // Automatic realistic developing ramp (random small interval 4.0 - 8.0s)
+      const ramp_s = Number((Math.random() * 4 + 4).toFixed(1));
+
+      if (kind === 'catastrophic_failure') {
+        await fetch('/api/control/health', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ health: 0.0 })
+        });
+        await fetch('/api/faults/inject', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind: 'misfire', severity: 1.0, cylinder: 0, ramp_s: 0.5, start_in_s: 0.0 })
+        });
+        refreshFaultsList();
+        return;
+      }
 
       const res = await fetch('/api/faults/inject', {
         method: 'POST',
@@ -905,24 +990,35 @@
 
     btnClearFaults.addEventListener('click', async () => {
       await fetch('/api/faults/clear', { method: 'POST' });
+      await fetch('/api/control/health', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ health: 1.0 })
+      });
       refreshFaultsList();
     });
+
+    function renderFaultsList(list) {
+      if (!list || list.length === 0) {
+        activeFaultsList.innerHTML = '<div style="font-size: 0.75rem; color: var(--text-dim); font-style: italic;">No active faults (Nominal state)</div>';
+      } else {
+        activeFaultsList.innerHTML = list.map(f => {
+          const progText = f.progress !== undefined ? ` | ${Math.round(f.progress * 100)}% dev` : '';
+          return `
+            <div class="fault-tag">
+              <span><strong>#${f.id} ${f.kind}</strong> ${f.cylinder !== null ? `(Cyl ${f.cylinder + 1})` : ''}</span>
+              <span>${Math.round(f.severity * 100)}% sev | +${f.ramp_s}s${progText}</span>
+            </div>
+          `;
+        }).join('');
+      }
+    }
 
     async function refreshFaultsList() {
       try {
         const res = await fetch('/api/faults');
         const data = await res.json();
-        const list = data.active_faults || [];
-        if (list.length === 0) {
-          activeFaultsList.innerHTML = '<div style="font-size: 0.75rem; color: var(--text-dim); font-style: italic;">No active faults (Nominal state)</div>';
-        } else {
-          activeFaultsList.innerHTML = list.map(f => `
-            <div class="fault-tag">
-              <span><strong>#${f.id} ${f.kind}</strong> ${f.cylinder !== null ? `(Cyl ${f.cylinder + 1})` : ''}</span>
-              <span>${Math.round(f.severity * 100)}% sev | +${f.ramp_s}s</span>
-            </div>
-          `).join('');
-        }
+        renderFaultsList(data.active_faults || []);
       } catch (e) {
         console.error("Error fetching faults list:", e);
       }

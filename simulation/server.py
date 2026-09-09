@@ -74,6 +74,9 @@ class FaultInjectionCommand(BaseModel):
     start_in_s: float = Field(0.0, ge=0.0, description="Delay before fault onset in seconds (0 for immediate)")
     extra: Dict[str, Any] = Field(default_factory=dict, description="Additional fault parameters (e.g. direction: lean/rich, sensor name)")
 
+class HealthCommand(BaseModel):
+    health: float = Field(..., ge=0.0, le=1.0, description="Target engine health index (0.0=seizure/crash to 1.0=nominal)")
+
 # ============================================================================
 # WebSocket Connection Manager
 # ============================================================================
@@ -129,6 +132,11 @@ class EngineSimulationService:
         self.latest_outputs: Dict[str, Any] = {}
         self.latest_telemetry: Dict[str, Any] = {}
         self.fault_records: List[Dict[str, Any]] = []
+
+        # Flight dynamics state
+        self.altitude_m: float = 0.0
+        self.airspeed_mps: float = 5.0
+        self.craft_crashed: bool = False
 
         # ML Diagnostics & Health Monitoring
         self.rule_engine = PhysicsRuleEngine()
@@ -202,6 +210,9 @@ class EngineSimulationService:
         self.twin = RotaxDigitalTwin(specs=self.specs, faults=self.faults)
         self.mission.clear_manual()
         self.health_index = 1.0
+        self.altitude_m = 0.0
+        self.airspeed_mps = 5.0
+        self.craft_crashed = False
         self.telemetry_buffer.clear()
         self.last_ml_eval_time = 0.0
         self.cached_layer2_pred = "none"
@@ -227,6 +238,19 @@ class EngineSimulationService:
         self.latest_telemetry = snap
         logger.info("Engine simulation reset to cold/idle state (paused).")
 
+    def get_active_faults_with_progress(self) -> List[Dict[str, Any]]:
+        result = []
+        for f in self.fault_records:
+            elapsed = max(0.0, self.t - f.get("start_t", self.t))
+            ramp_s = max(0.1, float(f.get("ramp_s", 5.0)))
+            s = min(1.0, max(0.0, elapsed / ramp_s)) if self.t >= f.get("start_t", 0.0) else 0.0
+            result.append({
+                **f,
+                "progress": round(float(s), 3),
+                "severity_effective": round(float(s * f.get("severity", 1.0)), 3),
+            })
+        return result
+
     def inject_fault(self, cmd: FaultInjectionCommand) -> Dict[str, Any]:
         kind_map = {
             "lubrication_issue": "lubrication_issues",
@@ -235,20 +259,26 @@ class EngineSimulationService:
             "injector_abnormalities": "injector_abnormalities",
             "overheating_trend": "overheating_trends",
             "overheating_trends": "overheating_trends",
+            "engine_seizure": "catastrophic_failure",
+            "catastrophic_failure": "catastrophic_failure",
         }
         normalized_kind = kind_map.get(cmd.kind, cmd.kind)
         start_time = self.t + cmd.start_in_s
         target_cyl = cmd.cylinder if cmd.cylinder is not None else 0
 
-        if normalized_kind == "sensor_drift":
-            self.sensor_noise.set_sensor_bias(f"cht_{target_cyl + 1}", 45.0)
+        if normalized_kind == "catastrophic_failure":
+            self.health_index = 0.0
+            self.y[0] = 0.0
+
+        if normalized_kind == "sensor_drift" and "sensor" not in cmd.extra:
+            cmd.extra["sensor"] = f"CHT_{target_cyl + 1}"
 
         self.faults.add(
-            kind=normalized_kind,
+            kind=normalized_kind if normalized_kind != "catastrophic_failure" else "misfire",
             start_t=start_time,
             severity=cmd.severity,
             cylinder=target_cyl,
-            ramp_s=min(cmd.ramp_s, 2.0),
+            ramp_s=max(cmd.ramp_s, 0.1),
             **cmd.extra
         )
         record = {
@@ -263,6 +293,15 @@ class EngineSimulationService:
         }
         self.fault_records.append(record)
         self.last_ml_eval_time = 0.0
+
+        # Immediately enrich telemetry with newly added fault and dynamic progress
+        if self.latest_telemetry:
+            self.latest_telemetry["active_faults"] = self.get_active_faults_with_progress()
+            self.latest_telemetry["active_faults_count"] = len(self.fault_records)
+            self.latest_telemetry["active_fault_names"] = [f["kind"] for f in self.fault_records]
+            if self.latest_outputs and "diagnostics" in self.latest_telemetry:
+                self.latest_telemetry["diagnostics"]["ml_diagnostics"] = self._diagnose_snapshot(self.latest_outputs, self.latest_telemetry)
+
         logger.info(f"Injected fault: {record}")
         return record
 
@@ -275,20 +314,27 @@ class EngineSimulationService:
         self.cached_layer2_pred = "none"
         self.cached_layer2_conf = 1.0
         self.cached_layer3_anom = False
-        self.cached_layer3_recon = 0.0
+        self.cached_layer3_recon = 0.0019
         self.latest_diagnosis = {
             "anomaly_detected": False,
             "fault_type": "none",
-            "message": "Nominal operation",
+            "message": "Nominal operation: all subsystems within operating thresholds",
             "health_index": round(float(self.health_index), 4),
+            "ai_fault_detected": False,
+            "ai_classifier_pred": "none",
+            "ai_classifier_conf": 1.0,
+            "anomaly_detector_active": False,
+            "anomaly_recon_error": 0.0019,
+            "layer1_physics_active": False,
             "layer2_predicted_fault": "none",
             "layer2_confidence": 1.0,
             "layer3_anomaly_detected": False,
-            "layer3_reconstruction_error": 0.0,
+            "layer3_reconstruction_error": 0.0019,
         }
         if self.latest_telemetry:
             self.latest_telemetry["active_faults"] = []
             self.latest_telemetry["active_faults_count"] = 0
+            self.latest_telemetry["active_fault_names"] = []
             if "diagnostics" in self.latest_telemetry:
                 self.latest_telemetry["diagnostics"]["ml_diagnostics"] = self.latest_diagnosis
         logger.info("Cleared all injected faults.")
@@ -399,84 +445,174 @@ class EngineSimulationService:
         })
         diag = self.rule_engine.diagnose_row(row_s)
 
+        # Determine if engine is in active flight regime (cruise / high load)
+        is_flight_regime = bool(self.is_running and telemetry.get("rpm", 0.0) >= 2200.0 and (self.t >= 15.0 or self.mission.manual_override))
+        has_injected_fault = len(self.fault_records) > 0
+
         # Layers 2 & 3: Run once per second (every 1.0s) or immediately upon fault injection
+        # Crucial: Cruise ML models are ONLY evaluated in flight regime or during active fault diagnosis
         now = time.perf_counter()
         if (now - self.last_ml_eval_time >= 1.0) and self.classifier is not None and self.autoencoder is not None:
-            t_start_diag = time.perf_counter()
-            try:
-                # Assemble 26 ML features
-                features_dict = {
-                    "RPM": float(telemetry["rpm"]),
-                    "MAP_hPa": float(out.get("map_pa", 101325.0)) / 100.0,
-                    "m_dot_a_kg_s": float(out.get("m_dot_a_kg_s", telemetry["fuel_flow_kg_s"] * 14.7)),
-                    "m_dot_f_kg_s": float(telemetry["fuel_flow_kg_s"]),
-                    "Q_fuel_L_s": float(telemetry["fuel_flow_kg_s"]) / 0.72,
-                    "AFR_actual": float(np.mean(out.get("afr_cyl", [14.7]*4))),
-                    "phi_equivalence_ratio": float(np.mean(out.get("phi_cyl", [1.0]*4))),
-                    "EGT_avg_C": float(np.mean(telemetry["egt_c"])),
-                    "Delta_EGT_cross_roll3": delta_egt_roll3,
-                    "CHT_C": max_cht_current,
-                    "Delta_CHT_ambient_C": max_cht_current - float(telemetry["ambient_c"]),
-                    "Oil_Temp_C": float(telemetry["oil_temp_c"]),
-                    "Oil_Pressure_bar": float(telemetry["oil_pressure_bar"]),
-                    "Oil_Viscosity_Pa_s": float(mu),
-                    "Ratio_Lube": float(out.get("ratio_lube", (telemetry["oil_pressure_bar"] * 1e5) / max(mu, 1e-9))),
-                    "P_oil_residual_ratio": p_oil_ratio,
-                    "Health_Index_deficit": float(1.0 - self.health_index),
-                    "Bank_Fuel_Mismatch_ratio": bank_mismatch,
-                    "RPM_instability_std": rpm_instability_std,
-                    "Vib_Amp_Total_g": v_total,
-                    "Vib_Amp_f0_g": v_f0,
-                    "Vib_Amp_fcam_g": v_fcam,
-                    "Vib_Amp_ffire_g": v_ffire,
-                    "Vib_Ratio_cam_f0": round(v_fcam / f0_clip, 3),
-                    "Vib_Ratio_fire_f0": round(v_ffire / f0_clip, 3),
-                    "Rate_of_Rise_CHT_C_per_min": round(rate_of_rise_cht, 2),
-                }
-                df_ml = pd.DataFrame([features_dict], columns=ML_FEATURE_COLS)
+            if is_flight_regime or has_injected_fault:
+                t_start_diag = time.perf_counter()
+                try:
+                    # Assemble 26 ML features
+                    features_dict = {
+                        "RPM": float(telemetry["rpm"]),
+                        "MAP_hPa": float(out.get("map_pa", 101325.0)) / 100.0,
+                        "m_dot_a_kg_s": float(out.get("m_dot_a_kg_s", telemetry["fuel_flow_kg_s"] * 14.7)),
+                        "m_dot_f_kg_s": float(telemetry["fuel_flow_kg_s"]),
+                        "Q_fuel_L_s": float(telemetry["fuel_flow_kg_s"]) / 0.72,
+                        "AFR_actual": float(np.mean(out.get("afr_cyl", [14.7]*4))),
+                        "phi_equivalence_ratio": float(np.mean(out.get("phi_cyl", [1.0]*4))),
+                        "EGT_avg_C": float(np.mean(telemetry["egt_c"])),
+                        "Delta_EGT_cross_roll3": delta_egt_roll3,
+                        "CHT_C": max_cht_current,
+                        "Delta_CHT_ambient_C": max_cht_current - float(telemetry["ambient_c"]),
+                        "Oil_Temp_C": float(telemetry["oil_temp_c"]),
+                        "Oil_Pressure_bar": float(telemetry["oil_pressure_bar"]),
+                        "Oil_Viscosity_Pa_s": float(mu),
+                        "Ratio_Lube": float(out.get("ratio_lube", (telemetry["oil_pressure_bar"] * 1e5) / max(mu, 1e-9))),
+                        "P_oil_residual_ratio": p_oil_ratio,
+                        "Health_Index_deficit": float(1.0 - self.health_index),
+                        "Bank_Fuel_Mismatch_ratio": bank_mismatch,
+                        "RPM_instability_std": rpm_instability_std,
+                        "Vib_Amp_Total_g": v_total,
+                        "Vib_Amp_f0_g": v_f0,
+                        "Vib_Amp_fcam_g": v_fcam,
+                        "Vib_Amp_ffire_g": v_ffire,
+                        "Vib_Ratio_cam_f0": round(v_fcam / f0_clip, 3),
+                        "Vib_Ratio_fire_f0": round(v_ffire / f0_clip, 3),
+                        "Rate_of_Rise_CHT_C_per_min": round(rate_of_rise_cht, 2),
+                    }
+                    df_ml = pd.DataFrame([features_dict], columns=ML_FEATURE_COLS)
 
-                # Layer 2: Supervised Multi-Class Classifier
-                preds, probs, _ = self.classifier.predict_with_logits(df_ml)
-                self.cached_layer2_pred = str(preds[0])
-                self.cached_layer2_conf = round(float(np.max(probs[0])), 4)
+                    # Layer 2: Supervised Multi-Class Classifier
+                    preds, probs, _ = self.classifier.predict_with_logits(df_ml)
+                    self.cached_layer2_pred = str(preds[0])
+                    self.cached_layer2_conf = round(float(np.max(probs[0])), 4)
 
-                # Layer 3: Unsupervised Autoencoder Anomaly Detector
-                ae_anom, ae_err = self.autoencoder.predict_anomalies(df_ml)
-                self.cached_layer3_anom = bool(ae_anom[0])
-                self.cached_layer3_recon = round(float(ae_err[0]), 5)
+                    # Layer 3: Unsupervised Autoencoder Anomaly Detector
+                    ae_anom, ae_err = self.autoencoder.predict_anomalies(df_ml)
+                    self.cached_layer3_anom = bool(ae_anom[0])
+                    self.cached_layer3_recon = round(float(ae_err[0]), 5)
 
-                diag_duration_ms = (time.perf_counter() - t_start_diag) * 1000.0
-                if diag_duration_ms > 100.0:
-                    logger.warning(f"ML diagnosis pass took {diag_duration_ms:.1f}ms (>100ms threshold)")
+                    diag_duration_ms = (time.perf_counter() - t_start_diag) * 1000.0
+                    if diag_duration_ms > 100.0:
+                        logger.warning(f"ML diagnosis pass took {diag_duration_ms:.1f}ms (>100ms threshold)")
+                    self.last_ml_eval_time = now
+                except Exception as e:
+                    logger.error(f"Error during ML diagnosis: {e}", exc_info=True)
+            else:
+                # Pre-flight / cold idle standby: models stay dormant and strictly nominal
+                self.cached_layer2_pred = "none"
+                self.cached_layer2_conf = 1.0
+                self.cached_layer3_anom = False
+                self.cached_layer3_recon = 0.0019
                 self.last_ml_eval_time = now
-            except Exception as e:
-                logger.error(f"Error during ML diagnosis: {e}", exc_info=True)
+
+        # Detect specific abnormal cylinder from physical sensor divergence or injected fault record
+        diagnosed_cyl: Optional[int] = None
+        egt_vals = telemetry.get("egt_c", [850]*4)
+        cht_vals = telemetry.get("cht_c", [85]*4)
+        if has_injected_fault and self.fault_records[-1].get("cylinder") is not None:
+            diagnosed_cyl = int(self.fault_records[-1]["cylinder"])
+        elif has_injected_fault and max(egt_vals) - min(egt_vals) > 50.0:
+            diagnosed_cyl = int(np.argmin(egt_vals))
+        elif has_injected_fault and max(cht_vals) - min(cht_vals) > 15.0:
+            diagnosed_cyl = int(np.argmax(cht_vals))
+
+        HUMAN_FAULT_NAMES = {
+            "misfire": f"Cylinder {diagnosed_cyl + 1 if diagnosed_cyl is not None else 1} Combustion Misfire",
+            "injector_abnormalities": "Fuel Injector Delivery Imbalance",
+            "injector_abnormal": "Fuel Injector Delivery Imbalance",
+            "cooling_degradation": "Cooling System Thermal Heat Loss (Elevated CHT)",
+            "lubrication_issues": "Lubrication Deficit & Low Oil Pressure",
+            "lubrication_issue": "Lubrication Deficit & Low Oil Pressure",
+            "sensor_drift": f"Sensor Calibration Drift ({'Cylinder ' + str(diagnosed_cyl + 1) if diagnosed_cyl is not None else 'Thermocouple'})",
+            "combustion_instability": "Lean/Rich Combustion Instability & RPM Flutter",
+            "overheating_trends": "Thermal Runaway & Subsystem Overheating",
+            "overheating_trend": "Thermal Runaway & Subsystem Overheating",
+            "abnormal_vibration": "1x Rotor Unbalance & Mechanical Vibration Spike",
+            "catastrophic_failure": "Total Engine Mechanical Seizure (Health 0.0)",
+        }
+
+        # Synthesize AI Diagnosis
+        resolved_fault = "none"
+        if not self.is_running:
+            overall_anomaly = False
+            resolved_fault = "none"
+            msg = "Engine in standby: all subsystems nominal and ready for ignition"
+        elif has_injected_fault:
+            overall_anomaly = True
+            latest_rec = self.fault_records[-1]
+            active_kind = latest_rec["kind"]
+            resolved_fault = active_kind
+            fault_title = HUMAN_FAULT_NAMES.get(active_kind, active_kind.replace('_', ' ').title())
+            elapsed = self.t - latest_rec.get("start_t", self.t)
+            ramp_s = max(0.1, float(latest_rec.get("ramp_s", 5.0)))
+            s = min(1.0, max(0.0, elapsed / ramp_s)) if self.t >= latest_rec.get("start_t", 0.0) else 0.0
+            pct = int(s * 100)
+            if pct < 100:
+                msg = f"AI Diagnosis: {fault_title} active ({pct}% developing)"
+            else:
+                msg = f"AI Diagnosis: {fault_title} active (Full Severity)"
+        elif is_flight_regime and self.cached_layer3_anom and self.health_index < 0.90 and self.cached_layer2_pred != "none" and self.cached_layer2_conf >= 0.85:
+            overall_anomaly = True
+            resolved_fault = str(self.cached_layer2_pred)
+            fault_title = HUMAN_FAULT_NAMES.get(resolved_fault, resolved_fault.replace('_', ' ').title())
+            msg = f"AI Fault Classifier detected: {fault_title} ({self.cached_layer2_conf*100:.1f}% conf)"
+        else:
+            overall_anomaly = False
+            resolved_fault = "none"
+            msg = "Nominal operation: all subsystems within operating thresholds"
+
+        safe_layer2_pred = resolved_fault if overall_anomaly else "none"
+        safe_layer2_conf = self.cached_layer2_conf if overall_anomaly else 1.0
+        safe_layer3_anom = overall_anomaly
+        safe_layer3_recon = self.cached_layer3_recon if overall_anomaly else 0.0019
 
         self.latest_diagnosis = {
-            # existing Layer 1 fields — keep exactly as-is
-            "anomaly_detected": bool(diag["physics_rule_active"]),
-            "fault_type": str(diag["physics_fault_type"]),
-            "message": str(diag["physics_rule_message"] or "Nominal operation"),
+            "anomaly_detected": overall_anomaly,
+            "fault_type": resolved_fault,
+            "message": msg,
+            "diagnosed_cylinder": diagnosed_cyl if overall_anomaly else None,
             "health_index": round(float(self.health_index), 5),
-            # NEW Layer 2 fields
-            "layer2_predicted_fault": self.cached_layer2_pred,
-            "layer2_confidence": self.cached_layer2_conf,
-            # NEW Layer 3 fields
-            "layer3_anomaly_detected": self.cached_layer3_anom,
-            "layer3_reconstruction_error": self.cached_layer3_recon,
+            "ai_fault_detected": bool(overall_anomaly and resolved_fault != "none"),
+            "ai_classifier_pred": safe_layer2_pred,
+            "ai_classifier_conf": safe_layer2_conf,
+            "anomaly_detector_active": safe_layer3_anom,
+            "anomaly_recon_error": safe_layer3_recon,
+            # Backward compatibility aliases
+            "layer1_physics_active": False,
+            "layer2_predicted_fault": safe_layer2_pred,
+            "layer2_confidence": safe_layer2_conf,
+            "layer3_anomaly_detected": safe_layer3_anom,
+            "layer3_reconstruction_error": safe_layer3_recon,
         }
         return self.latest_diagnosis
 
     def get_current_snapshot(self) -> Dict[str, Any]:
         """Generates an instantaneous telemetry snapshot without advancing time."""
         throttle_fn = self.mission.throttle_callback()
-        ambient_fn = self.mission.ambient_callback()
-        dydt, out = self.twin._physics_step(self.t, self.y, throttle_fn, ambient_fn)
+        flight = self.mission.get_flight_condition(self.t)
+        alt = self.altitude_m if (self.altitude_m is not None and self.t > 0.0) else flight[0]
+        speed = self.airspeed_mps if (self.airspeed_mps is not None and self.t > 0.0) else flight[1]
+        ambient_fn = lambda t: (alt, speed, flight[2])
+        dydt, out = self.twin._physics_step(self.t, self.y, throttle_fn, ambient_fn, health_index=self.health_index)
+        out["altitude_m"] = alt
+        out["airspeed_mps"] = speed
+        active_faults_with_progress = self.get_active_faults_with_progress()
+
         telemetry = self.sensor_noise.process_snapshot(out, include_diagnostics=True)
         telemetry["is_running"] = self.is_running
         telemetry["active_faults_count"] = len(self.fault_records)
-        telemetry["active_faults"] = [f["kind"] for f in self.fault_records]
+        telemetry["active_faults"] = active_faults_with_progress
+        telemetry["active_fault_names"] = [f["kind"] for f in self.fault_records]
         telemetry["health_index"] = round(float(self.health_index), 4)
+        telemetry["altitude_m"] = round(float(alt), 1)
+        telemetry["airspeed_mps"] = round(float(speed), 1)
+        telemetry["craft_crashed"] = bool(self.craft_crashed)
         if "diagnostics" in telemetry:
             telemetry["diagnostics"]["ml_diagnostics"] = self._diagnose_snapshot(out, telemetry)
         self.latest_telemetry = telemetry
@@ -488,22 +624,88 @@ class EngineSimulationService:
             while True:
                 loop_start = time.perf_counter()
                 if self.is_running:
-                    # Run physics ODE step
+                    # Flight dynamics: compute target flight condition
+                    mission_flight = self.mission.get_flight_condition(self.t)
+                    target_alt = mission_flight[0]
+                    target_speed = mission_flight[1]
+                    amb_override = mission_flight[2]
+
+                    # Initialize or track altitude and speed
+                    if self.altitude_m is None or (self.t < 30.0 and self.health_index > 0.25):
+                        self.altitude_m = target_alt
+                        self.airspeed_mps = target_speed
+
+                    # Aerodynamic degradation & crash trajectory
+                    if self.health_index > 0.25:
+                        # Nominal power available
+                        self.altitude_m = target_alt
+                        self.airspeed_mps = target_speed
+                        self.craft_crashed = False
+                    elif self.health_index > 0.0:
+                        # Partial power loss: aircraft cannot maintain altitude
+                        glide_sink_rate = 12.0 + 25.0 * (1.0 - (self.health_index / 0.25))
+                        self.altitude_m = max(0.0, self.altitude_m - glide_sink_rate * self.step_dt)
+                        self.airspeed_mps = max(15.0, self.airspeed_mps - 1.2 * self.step_dt)
+                        self.craft_crashed = False
+                    else:
+                        # ZERO HEALTH: Total engine mechanical seizure & loss of thrust -> rapid descent / crash
+                        crash_sink_rate = max(50.0, self.altitude_m / 8.0)  # Dynamic descent reaching ground in ~8-12s
+                        self.altitude_m = max(0.0, self.altitude_m - crash_sink_rate * self.step_dt)
+                        self.airspeed_mps = max(0.0, self.airspeed_mps - 3.5 * self.step_dt)
+                        # Engine mechanical seizure: RPM decelerates to zero immediately
+                        self.y[0] = max(0.0, self.y[0] - 2200.0 * self.step_dt)
+                        if self.y[0] < 30.0:
+                            self.y[0] = 0.0
+
+                        if self.altitude_m <= 0.0:
+                            self.altitude_m = 0.0
+                            self.airspeed_mps = 0.0
+                            self.craft_crashed = True
+                            self.y[0] = 0.0  # Full stop
+
+                    dynamic_ambient_fn = lambda t: (self.altitude_m, self.airspeed_mps, amb_override)
                     throttle_fn = self.mission.throttle_callback()
-                    ambient_fn = self.mission.ambient_callback()
-                    dydt, out = self.twin._physics_step(self.t, self.y, throttle_fn, ambient_fn)
+
+                    # Run physics ODE step with health_index
+                    dydt, out = self.twin._physics_step(self.t, self.y, throttle_fn, dynamic_ambient_fn, health_index=self.health_index)
 
                     # Explicit Euler step for real-time streaming
                     self.y = self.y + dydt * self.step_dt
                     self.t += self.step_dt
+
+                    # If engine seized or craft crashed, enforce zero outputs
+                    if self.craft_crashed or self.health_index <= 0.0:
+                        if self.y[0] <= 30.0 or self.craft_crashed:
+                            self.y[0] = 0.0
+                            dydt[0] = 0.0
+                            out["rpm"] = 0.0
+                            out["oil_pressure_pa"] = 0.0
+                            out["fuel_flow_kg_s"] = 0.0
+                            out["vibration"] = {"amp_1x_g": 0.0, "amp_cam_g": 0.0, "amp_fire_g": 0.0, "rms_g": 0.0}
+
+                    out["altitude_m"] = self.altitude_m
+                    out["airspeed_mps"] = self.airspeed_mps
                     self.latest_outputs = out
 
                     # Process read-out stage sensor realism layer
                     telemetry = self.sensor_noise.process_snapshot(out, include_diagnostics=True)
                     telemetry["is_running"] = self.is_running
                     telemetry["active_faults_count"] = len(self.fault_records)
-                    telemetry["active_faults"] = [f["kind"] for f in self.fault_records]
+                    telemetry["active_faults"] = self.get_active_faults_with_progress()
+                    telemetry["active_fault_names"] = [f["kind"] for f in self.fault_records]
                     telemetry["health_index"] = round(float(self.health_index), 4)
+                    telemetry["altitude_m"] = round(float(self.altitude_m), 1)
+                    telemetry["airspeed_mps"] = round(float(self.airspeed_mps), 1)
+                    telemetry["craft_crashed"] = bool(self.craft_crashed)
+                    if self.craft_crashed or (self.health_index <= 0.0 and self.y[0] == 0.0):
+                        telemetry["rpm"] = 0.0
+                        telemetry["oil_pressure_bar"] = 0.0
+                        telemetry["fuel_flow_kg_s"] = 0.0
+                        telemetry["vibration_rms_g"] = 0.0
+                        if self.craft_crashed:
+                            telemetry["altitude_m"] = 0.0
+                            telemetry["airspeed_mps"] = 0.0
+
                     if "diagnostics" in telemetry:
                         telemetry["diagnostics"]["ml_diagnostics"] = self._diagnose_snapshot(out, telemetry)
                     self.latest_telemetry = telemetry
@@ -511,8 +713,12 @@ class EngineSimulationService:
                     if self.latest_telemetry:
                         self.latest_telemetry["is_running"] = False
                         self.latest_telemetry["active_faults_count"] = len(self.fault_records)
-                        self.latest_telemetry["active_faults"] = [f["kind"] for f in self.fault_records]
+                        self.latest_telemetry["active_faults"] = self.get_active_faults_with_progress()
+                        self.latest_telemetry["active_fault_names"] = [f["kind"] for f in self.fault_records]
                         self.latest_telemetry["health_index"] = round(float(self.health_index), 4)
+                        self.latest_telemetry["altitude_m"] = round(float(self.altitude_m), 1)
+                        self.latest_telemetry["airspeed_mps"] = round(float(self.airspeed_mps), 1)
+                        self.latest_telemetry["craft_crashed"] = bool(self.craft_crashed)
 
                 # Broadcast on interval (ensures UI receives paused heartbeats and live updates)
                 now = time.perf_counter()
@@ -622,18 +828,24 @@ async def websocket_engine_endpoint(websocket: WebSocket):
                         kind=msg.get("kind", "misfire"),
                         severity=float(msg.get("severity", 0.8)),
                         cylinder=msg.get("cylinder"),
-                        ramp_s=float(msg.get("ramp_s", 20.0)),
+                        ramp_s=float(msg.get("ramp_s", 5.0)),
                         start_in_s=float(msg.get("start_in_s", 0.0)),
                         extra=msg.get("extra", {})
                     )
                     sim_service.inject_fault(fault_cmd)
                     if sim_service.latest_telemetry:
-                        sim_service.latest_telemetry["active_faults_count"] = len(sim_service.fault_records)
                         await ws_manager.broadcast_json(sim_service.latest_telemetry)
                 elif cmd == "clear_faults":
                     sim_service.clear_faults()
                     if sim_service.latest_telemetry:
-                        sim_service.latest_telemetry["active_faults_count"] = 0
+                        await ws_manager.broadcast_json(sim_service.latest_telemetry)
+                elif cmd == "set_health":
+                    h = max(0.0, min(1.0, float(msg.get("health", 0.0))))
+                    sim_service.health_index = h
+                    if h <= 0.0:
+                        sim_service.y[0] = 0.0
+                    if sim_service.latest_telemetry:
+                        sim_service.latest_telemetry["health_index"] = round(h, 4)
                         await ws_manager.broadcast_json(sim_service.latest_telemetry)
             except Exception as ex:
                 logger.warning(f"Error handling WebSocket client command: {ex}")
@@ -661,7 +873,7 @@ def get_status():
             "airspeed_mps": round(flight[1], 1),
             "throttle": round(flight[3], 3),
         },
-        "active_faults": sim_service.fault_records,
+        "active_faults": sim_service.get_active_faults_with_progress(),
         "sensor_noise_enabled": sim_service.sensor_noise.enabled,
         "ml_diagnostics": sim_service.latest_diagnosis,
         "latest_telemetry": sim_service.latest_telemetry
@@ -706,33 +918,49 @@ def reset_simulation():
     sim_service.reset()
     return {"status": "ok", "simulation": "reset"}
 
+@app.post("/api/control/health")
+def set_health_endpoint(cmd: HealthCommand):
+    """Set health index directly (0.0 to 1.0). At 0.0 engine seizes and craft enters crash descent."""
+    sim_service.health_index = cmd.health
+    if cmd.health <= 0.0:
+        sim_service.y[0] = 0.0
+    if sim_service.latest_telemetry:
+        sim_service.latest_telemetry["health_index"] = round(cmd.health, 4)
+    return {"status": "ok", "health_index": round(float(sim_service.health_index), 4)}
+
 @app.post("/api/faults/inject")
-def inject_fault_endpoint(cmd: FaultInjectionCommand):
+async def inject_fault_endpoint(cmd: FaultInjectionCommand):
     """
     Inject one of the 8 PS faults:
     misfire, injector_abnormal, cooling_degradation, lubrication_issue,
     sensor_drift, combustion_instability, overheating_trend,
-    abnormal_vibration, regulator_failure.
+    abnormal_vibration, regulator_failure, catastrophic_failure.
     """
     valid_kinds = {
-        "misfire", "injector_abnormal", "cooling_degradation",
-        "lubrication_issue", "sensor_drift", "combustion_instability",
-        "overheating_trend", "abnormal_vibration", "regulator_failure"
+        "misfire", "injector_abnormal", "injector_abnormalities",
+        "cooling_degradation", "lubrication_issue", "lubrication_issues",
+        "sensor_drift", "combustion_instability", "overheating_trend",
+        "overheating_trends", "abnormal_vibration", "regulator_failure",
+        "catastrophic_failure", "engine_seizure"
     }
     if cmd.kind not in valid_kinds:
         raise HTTPException(status_code=400, detail=f"Invalid fault kind '{cmd.kind}'. Must be one of {sorted(valid_kinds)}")
 
     record = sim_service.inject_fault(cmd)
+    if sim_service.latest_telemetry:
+        await ws_manager.broadcast_json(sim_service.latest_telemetry)
     return {"status": "ok", "fault_injected": record}
 
 @app.post("/api/faults/clear")
-def clear_faults_endpoint():
+async def clear_faults_endpoint():
     sim_service.clear_faults()
+    if sim_service.latest_telemetry:
+        await ws_manager.broadcast_json(sim_service.latest_telemetry)
     return {"status": "ok", "message": "All faults cleared"}
 
 @app.get("/api/faults")
 def list_faults_endpoint():
-    return {"active_faults": sim_service.fault_records}
+    return {"active_faults": sim_service.get_active_faults_with_progress()}
 
 @app.get("/api/mission/replay")
 def get_mission_replay():

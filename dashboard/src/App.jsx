@@ -82,7 +82,7 @@ export default function App() {
           SIH26054 (DRDO) Digital Twin System | Rotax 914F Aero Piston Turbocharged Engine
         </span>
         <span>
-          Architecture: L1 Physics Rules + L2 8-Fault Supervised Classifier + L3 Autoencoder Novelty Anomaly Detector
+          Architecture: Neural Fault Classifier + Autoencoder Anomaly Detector + Digital Twin Prognostics
         </span>
       </footer>
     </div>
