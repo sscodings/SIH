@@ -3,3 +3,10 @@ __pycache__/
 *$py.class
 .vscode/
 .idea/
+node_modules/
+dashboard/node_modules/
+dashboard/dist/
+dist/
+.DS_Store
+Thumbs.db
+
