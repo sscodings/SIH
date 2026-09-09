@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 
 export function ControlBar({ telemetry, isConnected, sendCommand }) {
   const [selectedFault, setSelectedFault] = useState('misfire');
-  const isRunning = telemetry?.is_running ?? false;
+  const [selectedCylinder, setSelectedCylinder] = useState(0);
+  const isRunning = telemetry?.is_running ?? true;
   const activeFaultsCount = telemetry?.active_faults_count ?? 0;
 
   const handleStart = () => {
@@ -18,18 +19,35 @@ export function ControlBar({ telemetry, isConnected, sendCommand }) {
   };
 
   const handleInjectFault = () => {
+    // Automatic realistic developing ramp (random small interval 4.0 - 8.0s)
+    const autoRamp = Number((Math.random() * 4 + 4).toFixed(1));
+
+    if (selectedFault === 'catastrophic_failure') {
+      sendCommand({ command: 'set_health', health: 0.0 });
+      sendCommand({
+        command: 'inject_fault',
+        kind: 'misfire',
+        severity: 1.0,
+        cylinder: 0,
+        ramp_s: 0.5,
+        start_in_s: 0.0,
+      });
+      return;
+    }
+
     sendCommand({
       command: 'inject_fault',
       kind: selectedFault,
       severity: 0.85,
-      cylinder: 0,
-      ramp_s: 1.5,
+      cylinder: Number(selectedCylinder),
+      ramp_s: autoRamp,
       start_in_s: 0.0,
     });
   };
 
   const handleClearFaults = () => {
     sendCommand({ command: 'clear_faults' });
+    sendCommand({ command: 'set_health', health: 1.0 });
   };
 
   return (
@@ -91,15 +109,31 @@ export function ControlBar({ telemetry, isConnected, sendCommand }) {
           onChange={(e) => setSelectedFault(e.target.value)}
           className="fault-select"
         >
-          <option value="misfire">1. Misfire (Cylinder 1)</option>
-          <option value="injector_abnormalities">2. Injector Mismatch (Bank 1)</option>
+          <option value="misfire">1. Misfire</option>
+          <option value="injector_abnormalities">2. Injector Mismatch</option>
           <option value="cooling_degradation">3. Cooling Heat Loss</option>
           <option value="lubrication_issues">4. Lubrication Deficit (Oil Leak)</option>
-          <option value="sensor_drift">5. Sensor Drift (CHT Cyl 1)</option>
+          <option value="sensor_drift">5. Sensor Drift</option>
           <option value="combustion_instability">6. Combustion Instability</option>
           <option value="overheating_trends">7. Overheating Trend</option>
           <option value="abnormal_vibration">8. 1x Shaft Unbalance Vibration</option>
+          <option value="catastrophic_failure">9. Catastrophic Failure (Health 0.0 & Crash)</option>
         </select>
+
+        {['misfire', 'sensor_drift', 'injector_abnormalities'].includes(selectedFault) && (
+          <select
+            value={selectedCylinder}
+            onChange={(e) => setSelectedCylinder(Number(e.target.value))}
+            className="fault-select"
+            style={{ width: '85px', minWidth: '85px', borderColor: 'var(--accent-amber)' }}
+            title="Target Cylinder"
+          >
+            <option value={0}>Cyl 1</option>
+            <option value={1}>Cyl 2</option>
+            <option value={2}>Cyl 3</option>
+            <option value={3}>Cyl 4</option>
+          </select>
+        )}
 
         <button
           type="button"

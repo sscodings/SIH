@@ -241,7 +241,7 @@ def compute_vibration_features(rpm: float, fault_state: dict) -> dict:
     f_gear = 43.0 * f0  # Z_TEETH = 43 reduction gearbox mesh frequency
     amp_1x = 0.05 + fault_state["unbalance_extra"]
     amp_cam = 0.03 + 0.9 * (fault_state["extra_vibration"] + 0.5 * fault_state["rpm_instability"])
-    amp_fire = 0.08 + 2.8 * fault_state.get("extra_vibration", 0.0)
+    amp_fire = 0.08
     rms = float(np.sqrt(amp_1x ** 2 + amp_cam ** 2 + amp_fire ** 2))
     return dict(f0_hz=f0, f_cam_hz=f_cam, f_fire_hz=f_fire, f_gear_hz=f_gear,
                 amp_1x_g=amp_1x, amp_cam_g=amp_cam, amp_fire_g=amp_fire, rms_g=rms)
@@ -313,37 +313,36 @@ class FaultInjector:
                 state["rpm_instability"] += 0.5 * s
 
             elif ev.kind in ["injector_abnormal", "injector_abnormalities"]:
-                bias = 5.2 * s
+                bias = 5.0 * s
                 state["afr_bias"][0] += bias
                 state["afr_bias"][2] += bias
-                state["afr_bias"][1] -= bias * 0.35
-                state["afr_bias"][3] -= bias * 0.35
+                state["afr_bias"][1] -= bias * 0.4
+                state["afr_bias"][3] -= bias * 0.4
 
             elif ev.kind == "cooling_degradation":
-                state["cooling_factor"] *= (1.0 - 0.75 * s)
-                state["oil_cooling_factor"] *= (1.0 - 0.55 * s)
+                state["cooling_factor"] *= max(0.08, 1.0 - 0.88 * s)
 
             elif ev.kind in ["lubrication_issue", "lubrication_issues"]:
-                state["oil_leak_factor"] *= (1.0 - 0.56 * s)
-                state["oil_cooling_factor"] *= (1.0 - 0.3 * s)
+                state["oil_leak_factor"] *= max(0.15, 1.0 - 0.82 * s)
+                state["oil_cooling_factor"] *= max(0.20, 1.0 - 0.70 * s)
 
             elif ev.kind == "sensor_drift":
                 sensor = ev.extra.get("sensor", f"CHT_{idx + 1}")
                 rate = ev.extra.get("drift_per_s", 1.0)
                 state["sensor_drift"][sensor] = (
-                    state["sensor_drift"].get(sensor, 0.0) + (65.0 + rate * (t - ev.start_t)) * s
+                    state["sensor_drift"].get(sensor, 0.0) + (35.0 + rate * (t - ev.start_t)) * s
                 )
 
             elif ev.kind == "combustion_instability":
-                state["rpm_instability"] += 1.8 * s
-                state["extra_vibration"] += 0.65 * s
+                state["rpm_instability"] += 1.2 * s
+                state["extra_vibration"] += 0.8 * s
 
             elif ev.kind in ["overheating_trend", "overheating_trends"]:
-                state["cooling_factor"] *= (1.0 - 0.50 * s)
-                state["oil_cooling_factor"] *= (1.0 - 0.45 * s)
+                state["cooling_factor"] *= max(0.18, 1.0 - 0.75 * s)
+                state["oil_cooling_factor"] *= max(0.22, 1.0 - 0.70 * s)
 
             elif ev.kind == "abnormal_vibration":
-                state["unbalance_extra"] += 2.2 * s
+                state["unbalance_extra"] += 2.5 * s
 
             elif ev.kind == "regulator_failure":
                 state["regulator_failure"] = True
@@ -361,6 +360,8 @@ ThrottleFn = Callable[[float], float]    # t -> throttle in [0, 1]
 
 
 class RotaxDigitalTwin:
+    """Core physics-based digital twin integrating 6 state variables."""
+
     def __init__(self, specs: Optional[EngineSpecs] = None,
                  faults: Optional[FaultInjector] = None, seed: int = 42):
         self.specs = specs or EngineSpecs()
@@ -370,12 +371,17 @@ class RotaxDigitalTwin:
     # -- core physics: one call returns BOTH the ODE derivative and the
     #    full set of derived/algebraic sensor outputs at this instant --
     def _physics_step(self, t: float, y: np.ndarray, throttle_fn: ThrottleFn,
-                       ambient_fn: AmbientFn):
+                       ambient_fn: AmbientFn, health_index: float = 1.0):
         specs = self.specs
-        rpm = max(float(y[0]), 200.0)
+        raw_rpm = float(y[0])
+        if raw_rpm <= 0.0 or (health_index <= 0.0 and raw_rpm <= 15.0):
+            rpm = 0.0
+            omega = 1e-6
+        else:
+            rpm = raw_rpm
+            omega = max(rpm * 2 * np.pi / 60.0, 1e-6)
         cht = np.array(y[1:5], dtype=float)
         t_oil = float(y[5])
-        omega = rpm * 2 * np.pi / 60.0
 
         throttle = float(np.clip(throttle_fn(t), 0.0, 1.0))
         altitude_m, airspeed_mps, ambient_override_c = ambient_fn(t)
@@ -406,15 +412,43 @@ class RotaxDigitalTwin:
         timing_factor = timing_efficiency_factor(fs["timing_drift_deg"])
         q_indicated_cyl = specs.eta_thermal_indicated * q_released_cyl * timing_factor
 
+        # Power degradation under mechanical failure / reduced health
+        if health_index < 0.85:
+            # Progressive power loss between 0.85 and 0.25
+            if health_index >= 0.25:
+                health_pwr_mult = 0.45 + 0.55 * ((health_index - 0.25) / 0.60)
+            else:
+                health_pwr_mult = max(0.0, (health_index / 0.25) ** 1.5 * 0.45)
+            q_indicated_cyl = q_indicated_cyl * health_pwr_mult
+
         # --- rotational dynamics ---
-        torque_indicated = float(np.sum(q_indicated_cyl)) / omega
+        if rpm > 5.0 and health_index > 0.0:
+            torque_indicated = float(np.sum(q_indicated_cyl)) / omega
+        else:
+            torque_indicated = 0.0
+
         torque_friction = chen_flynn_friction_torque(rpm, map_pa, specs)
+        if health_index < 0.70:
+            # Metal-to-metal scoring / bearing friction drag
+            torque_friction += 90.0 * (1.0 - max(0.0, health_index / 0.70))
+
         torque_load = specs.k_prop_load * omega ** 2
         instability = fs["rpm_instability"]
         torque_noise = instability * self.rng.normal(0, 0.15) * max(torque_indicated, 1e-3)
 
-        domega_dt = (torque_indicated - torque_friction - torque_load + torque_noise) / specs.I_rotating_kg_m2
-        drpm_dt = domega_dt * 60.0 / (2 * np.pi)
+        if health_index <= 0.0:
+            torque_indicated = 0.0
+            torque_noise = 0.0
+            if y[0] > 0.0:
+                # Force rapid engine seizure deceleration to zero
+                drpm_dt = max(-3000.0, -float(y[0]) / 0.1)
+            else:
+                drpm_dt = 0.0
+        else:
+            domega_dt = (torque_indicated - torque_friction - torque_load + torque_noise) / specs.I_rotating_kg_m2
+            drpm_dt = domega_dt * 60.0 / (2 * np.pi)
+            if y[0] <= 0.0 and drpm_dt < 0.0:
+                drpm_dt = 0.0
 
         # --- per-cylinder CHT thermal balance (lumped capacitance) ---
         h_a = (
@@ -428,11 +462,19 @@ class RotaxDigitalTwin:
         q_rad = eps * sigma * a_rad * (((cht + 273.15) ** 4) - ((t_amb_c + 273.15) ** 4))
         dcht_dt = (q_head_cyl - q_conv - q_rad) / specs.cyl_thermal_capacity_j_per_k
 
+        # Direct visible thermal escalation under cooling failure / extreme heat
+        if fs["cooling_factor"] < 0.85:
+            dcht_dt += 12.0 * (1.0 - fs["cooling_factor"])
+
         # --- oil thermal balance ---
         q_friction_heat = torque_friction * omega
         h_oil = specs.h_oilcooler_base * (1 + 0.02 * airspeed_mps) * fs["oil_cooling_factor"]
         q_oil_out = h_oil * (t_oil - t_amb_c)
         dtoil_dt = (q_friction_heat - q_oil_out) / specs.oil_thermal_capacity_j_per_k
+
+        # Direct oil temperature escalation under oil cooling failure or lubrication leak
+        if fs["oil_cooling_factor"] < 0.85 or fs["oil_leak_factor"] < 0.85:
+            dtoil_dt += 8.0 * (1.0 - min(fs["oil_cooling_factor"], fs["oil_leak_factor"]))
 
         dydt = np.concatenate(([drpm_dt], dcht_dt, [dtoil_dt]))
 
@@ -440,7 +482,9 @@ class RotaxDigitalTwin:
         mu_oil = oil_viscosity_vogel(t_oil, specs)
         q_pump = specs.pump_flow_coeff * rpm * fs["oil_leak_factor"]
         p_oil_raw = (8 * mu_oil * specs.gallery_length_m * q_pump) / (np.pi * specs.gallery_radius_m ** 4)
-        p_oil = min(p_oil_raw, specs.oil_relief_pressure_pa)
+        # Under active oil leak/deficit, gallery pressure is directly bounded by available head
+        max_relievable_pa = specs.oil_relief_pressure_pa * min(1.0, fs["oil_leak_factor"] * 1.25)
+        p_oil = min(p_oil_raw, max_relievable_pa)
         ratio_lube = p_oil / max(mu_oil, 1e-9)
 
         cp_exhaust = 1150.0

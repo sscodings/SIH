@@ -22,13 +22,13 @@ export default function App() {
   useEffect(() => {
     if (wsLiveTelemetry && isConnected) {
       setTelemetry(prev => {
-        const liveRpm = Math.round(wsLiveTelemetry.rpm || prev.rpm);
+        const liveRpm = wsLiveTelemetry.rpm !== undefined ? Math.round(wsLiveTelemetry.rpm) : prev.rpm;
         const liveCht = wsLiveTelemetry.cht_c ? Number(Math.max(...wsLiveTelemetry.cht_c).toFixed(1)) : prev.cht;
         const liveEgt = wsLiveTelemetry.egt_c ? Number(Math.max(...wsLiveTelemetry.egt_c).toFixed(1)) : prev.egt;
-        const liveOilP = wsLiveTelemetry.oil_pressure_bar ? Number(wsLiveTelemetry.oil_pressure_bar.toFixed(1)) : prev.oilPressureBar;
-        const liveOilT = wsLiveTelemetry.oil_temp_c ? Number(wsLiveTelemetry.oil_temp_c.toFixed(1)) : prev.oilTempC;
-        const liveVib = wsLiveTelemetry.vibration_rms_g ? Number(wsLiveTelemetry.vibration_rms_g.toFixed(2)) : prev.vibrationRmsG;
-        const liveFuelLh = wsLiveTelemetry.fuel_flow_kg_s ? Number((wsLiveTelemetry.fuel_flow_kg_s * 3600 / 0.72).toFixed(2)) : prev.fuelFlowLh;
+        const liveOilP = wsLiveTelemetry.oil_pressure_bar !== undefined ? Number(wsLiveTelemetry.oil_pressure_bar.toFixed(1)) : prev.oilPressureBar;
+        const liveOilT = wsLiveTelemetry.oil_temp_c !== undefined ? Number(wsLiveTelemetry.oil_temp_c.toFixed(1)) : prev.oilTempC;
+        const liveVib = wsLiveTelemetry.vibration_rms_g !== undefined ? Number(wsLiveTelemetry.vibration_rms_g.toFixed(2)) : prev.vibrationRmsG;
+        const liveFuelLh = wsLiveTelemetry.fuel_flow_kg_s !== undefined ? Number((wsLiveTelemetry.fuel_flow_kg_s * 3600 / 0.72).toFixed(2)) : prev.fuelFlowLh;
 
         return {
           ...prev,
@@ -42,6 +42,8 @@ export default function App() {
           vibrationRmsG: liveVib,
           altitude_m: wsLiveTelemetry.altitude_m !== undefined ? wsLiveTelemetry.altitude_m : prev.altitude_m,
           alternator_v: wsLiveTelemetry.alternator_v !== undefined ? wsLiveTelemetry.alternator_v : prev.alternator_v,
+          craft_crashed: wsLiveTelemetry.craft_crashed !== undefined ? wsLiveTelemetry.craft_crashed : prev.craft_crashed,
+          health_index: wsLiveTelemetry.health_index !== undefined ? wsLiveTelemetry.health_index : prev.health_index,
           active_faults: wsLiveTelemetry.active_faults || prev.active_faults || [],
           active_faults_count: wsLiveTelemetry.active_faults_count ?? (wsLiveTelemetry.active_faults?.length || 0),
           diagnostics: wsLiveTelemetry.diagnostics || prev.diagnostics,

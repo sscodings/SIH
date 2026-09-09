@@ -85,8 +85,11 @@ class SensorNoiseModel:
             measured_amb_c = true_amb_c
             measured_alt_m = true_alt_m
         else:
-            # Apply Gaussian noise + sensor biases
-            measured_rpm = max(0.0, true_rpm + self.rng.normal(0, self.noise_stds["rpm"]))
+            # Apply Gaussian noise + sensor biases (suppressed when engine stopped or craft on ground)
+            if true_rpm > 25.0:
+                measured_rpm = max(0.0, true_rpm + self.rng.normal(0, self.noise_stds["rpm"]))
+            else:
+                measured_rpm = 0.0
 
             # CHT with per-cylinder noise & potential drift
             measured_cht = []
@@ -104,13 +107,29 @@ class SensorNoiseModel:
             measured_oil_temp = true_oil_temp + bias_ot + self.rng.normal(0, self.noise_stds["oil_temp"])
 
             bias_op = self.sensor_biases.get("oil_pressure", 0.0) + drift_dict.get("oil_pressure", 0.0)
-            measured_oil_press_bar = max(0.0, true_oil_press_bar + bias_op + self.rng.normal(0, self.noise_stds["oil_pressure"]))
+            if true_oil_press_bar > 0.05:
+                measured_oil_press_bar = max(0.0, true_oil_press_bar + bias_op + self.rng.normal(0, self.noise_stds["oil_pressure"]))
+            else:
+                measured_oil_press_bar = 0.0
 
-            measured_fuel_flow = max(0.0, true_fuel_flow + self.rng.normal(0, self.noise_stds["fuel_flow"]))
+            if true_fuel_flow > 1e-4:
+                measured_fuel_flow = max(0.0, true_fuel_flow + self.rng.normal(0, self.noise_stds["fuel_flow"]))
+            else:
+                measured_fuel_flow = 0.0
+
             measured_alt_v = max(0.0, true_alt_v + self.rng.normal(0, self.noise_stds["alternator_v"]))
-            measured_vib_rms = max(0.0, true_vib_rms + self.rng.normal(0, self.noise_stds["vibration_rms"]))
+
+            if true_rpm > 25.0:
+                measured_vib_rms = max(0.0, true_vib_rms + self.rng.normal(0, self.noise_stds["vibration_rms"]))
+            else:
+                measured_vib_rms = 0.0
+
             measured_amb_c = true_amb_c + self.rng.normal(0, self.noise_stds["ambient_temp"])
-            measured_alt_m = max(0.0, true_alt_m + self.rng.normal(0, self.noise_stds["altitude"]))
+
+            if true_alt_m > 1.0:
+                measured_alt_m = max(0.0, true_alt_m + self.rng.normal(0, self.noise_stds["altitude"]))
+            else:
+                measured_alt_m = 0.0
 
         # Format to exact Section 7.1 JSON schema
         telemetry = {
