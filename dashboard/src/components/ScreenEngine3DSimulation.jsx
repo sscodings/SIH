@@ -1,35 +1,48 @@
 import React, { useState } from 'react';
 import { EngineViewport } from './EngineViewport';
 
-const PIPELINE_STAGES = [
-  { key: 'NORMAL', label: '1. NORMAL', desc: 'Baseline Envelope' },
-  { key: 'INJECTED', label: '2. INJECTED', desc: 'Propagation Latency' },
-  { key: 'PROPAGATING', label: '3. PROPAGATING', desc: 'Physics Ramp' },
-  { key: 'DATA_COLLECTION', label: '4. DATA ACCUM', desc: 'Windowing' },
-  { key: 'ML_ANALYZING', label: '5. ML ANALYZING', desc: 'Neural Inference' },
-  { key: 'ANOMALY_DETECTED', label: '6. ANOMALY DETECTED', desc: 'Threshold Crossed' },
-  { key: 'FAULT_CLASSIFIED', label: '7. FAULT CLASSIFIED', desc: 'Alert Dispatched' },
+const FAULT_OPTIONS = [
+  { value: 'misfire', label: '1. Misfire (Cylinder Combustion Drop)' },
+  { value: 'injector_abnormalities', label: '2. Injector Mismatch (Dual-Bank Fuel Deficit)' },
+  { value: 'cooling_degradation', label: '3. Cooling Heat Rejection Loss' },
+  { value: 'lubrication_issues', label: '4. Lubrication Pressure Deficit' },
+  { value: 'sensor_drift', label: '5. CHT Sensor Drift Inconsistency' },
+  { value: 'combustion_instability', label: '6. Combustion Cyclic Jitter' },
+  { value: 'overheating_trends', label: '7. Overheating Thermal Runaway' },
+  { value: 'abnormal_vibration', label: '8. Gearbox 1x / Camshaft Vibration Spike' },
 ];
+
+const getAffectedComponentName = (fault, cylIdx) => {
+  const cNum = (cylIdx !== undefined && cylIdx !== null ? cylIdx : 0) + 1;
+  if (fault === 'misfire') return `Cylinder #${cNum} (Combustion Chamber)`;
+  if (fault === 'injector_abnormalities' || fault === 'injector_abnormal') return 'Intake Manifold / Dual-Bank Fuel Rails';
+  if (fault === 'cooling_degradation') return 'Coolant Lines & Radiator Assembly';
+  if (fault === 'lubrication_issues' || fault === 'lubrication_issue') return 'Oil Sump, Pump & Lubrication Circuit';
+  if (fault === 'sensor_drift') return `CHT Sensor #${cNum}`;
+  if (fault === 'combustion_instability') return `Cylinder #${cNum} Combustion / Spark Rail`;
+  if (fault === 'overheating_trends' || fault === 'overheating_trend') return 'Cylinder Head Thermal Jacket';
+  if (fault === 'abnormal_vibration') return 'Propeller Gearbox & Reduction Drive';
+  return 'Propulsion Assembly';
+};
 
 export function ScreenEngine3DSimulation({ telemetry, wsTelemetry, isConnected, sendCommand, onBack }) {
   // Configurable Simulation Controls
   const [selectedFault, setSelectedFault] = useState('misfire');
   const [severityVal, setSeverityVal] = useState(0.75); // 0.50 Low, 0.75 Med, 0.90 High
   const [simSpeed, setSimSpeed] = useState(1);         // 1x, 2x, 4x
-  const [detectionThreshold, setDetectionThreshold] = useState(80); // 60% to 95%
-  const [rampDuration, setRampDuration] = useState(3.5); // 2.0s, 3.5s, 6.0s
+  const [rampDuration, setRampDuration] = useState(3.5); // 2.0s, 3.5s, 6.0s (ODE progression rate)
   const [targetCylinder, setTargetCylinder] = useState(0); // Cyl 1-4
   const [throttleVal, setThrottleVal] = useState(65);
 
   // Active Simulation State
   const isRunning = wsTelemetry?.is_running ?? false;
-  const simTime = wsTelemetry?.t !== undefined ? wsTelemetry.t.toFixed(1) : telemetry.utcTime;
+  const simTime = wsTelemetry?.t !== undefined ? wsTelemetry.t.toFixed(1) : (telemetry.utcTime || '0.0');
 
   // Primary Critical Live Parameters
-  const rtm = wsTelemetry?.rtm_percent !== undefined ? Number(wsTelemetry.rtm_percent).toFixed(1) : '98.4';
-  const engineLoad = wsTelemetry?.engine_load_pct !== undefined ? Number(wsTelemetry.engine_load_pct).toFixed(1) : '77.2';
-  const rpm = wsTelemetry?.rpm !== undefined ? Math.round(wsTelemetry.rpm) : (telemetry.rpm || 4500);
-  const healthIndexVal = wsTelemetry?.health_index !== undefined ? Number(wsTelemetry.health_index) : 0.985;
+  const rtm = wsTelemetry?.rtm_percent !== undefined ? Number(wsTelemetry.rtm_percent).toFixed(1) : (isRunning ? '98.4' : '100.0');
+  const engineLoad = wsTelemetry?.engine_load_pct !== undefined ? Number(wsTelemetry.engine_load_pct).toFixed(1) : (isRunning ? '77.2' : '0.0');
+  const rpm = wsTelemetry?.rpm !== undefined ? Math.round(wsTelemetry.rpm) : (isRunning ? (telemetry.rpm || 4500) : 0);
+  const healthIndexVal = wsTelemetry?.health_index !== undefined ? Number(wsTelemetry.health_index) : 1.0;
   const healthPercent = Math.max(0, Math.min(100, healthIndexVal * 100));
 
   // Dynamic RTM Status Styling
@@ -37,33 +50,23 @@ export function ScreenEngine3DSimulation({ telemetry, wsTelemetry, isConnected, 
   const rtmStatus = rtmNum >= 90 ? 'OPTIMAL' : (rtmNum >= 75 ? 'DEGRADED' : 'CRITICAL');
   const rtmColor = rtmNum >= 90 ? 'var(--status-green)' : (rtmNum >= 75 ? 'var(--status-orange)' : '#ef4444');
 
-  // Progressive ML Pipeline State (Decoupled Fault Progression)
-  const pipeline = wsTelemetry?.ml_pipeline || {};
-  const stage = pipeline.stage || 'NORMAL';
-  const stageLabel = pipeline.stage_label || 'Normal Baseline Envelope';
-  const injectedFault = pipeline.injected_fault || 'none';
-  const isDetected = Boolean(pipeline.is_detected);
-  const detectedFault = pipeline.detected_fault || 'none';
-  const engineResponse = pipeline.engine_response || 'Nominal Baseline';
-  const mlStatus = pipeline.ml_status || 'Monitoring live telemetry stream';
-  const mlConfPct = pipeline.ml_confidence_pct !== undefined ? Number(pipeline.ml_confidence_pct).toFixed(1) : '1.5';
-  const devPct = pipeline.telemetry_deviation_pct !== undefined ? Number(pipeline.telemetry_deviation_pct).toFixed(1) : '0.0';
-  const latencyS = pipeline.detection_latency_s !== undefined ? Number(pipeline.detection_latency_s).toFixed(1) : '0.0';
-  const recommendation = pipeline.recommendation || 'Engine running nominally. Continuous predictive monitoring active.';
-  const thresholdPct = pipeline.detection_threshold !== undefined ? Math.round(pipeline.detection_threshold * 100) : detectionThreshold;
+  // Injected Fault & Detection State (Decoupled Fault Progression)
+  const injectedFault = wsTelemetry?.injected_fault || {
+    is_injected: false,
+    kind: 'none',
+    cylinder: 0,
+    severity: 0.0,
+    ramp_s: 3.5,
+    elapsed_s: 0.0,
+    is_detected: false,
+  };
 
-  // ML Diagnostics from Layer 1, 2, 3
+  const activeFaults = Array.isArray(wsTelemetry?.active_faults) ? wsTelemetry.active_faults.filter(f => f && f !== 'none') : [];
   const mlDiag = wsTelemetry?.diagnostics?.ml_diagnostics || {};
-  const l1Detected = Boolean(mlDiag.anomaly_detected);
-  const l1Fault = mlDiag.fault_type || 'none';
-  const l1Msg = mlDiag.message || 'Nominal physics thermodynamic envelope';
-
-  const l2Fault = mlDiag.layer2_predicted_fault || 'none';
-  const l2Conf = mlDiag.layer2_confidence !== undefined ? (mlDiag.layer2_confidence * 100).toFixed(1) : '94.2';
-  const l2Active = isDetected && l2Fault !== 'none' && l2Fault !== 'healthy';
-
-  const l3Detected = Boolean(isDetected && mlDiag.layer3_anomaly_detected);
-  const l3Error = mlDiag.layer3_reconstruction_error !== undefined ? Number(mlDiag.layer3_reconstruction_error).toFixed(4) : '0.0142';
+  const isDetected = activeFaults.length > 0 || Boolean(mlDiag.anomaly_detected);
+  const detectedFault = (activeFaults[0] || mlDiag.fault_type || 'none').toLowerCase();
+  const ruleMsg = mlDiag.message || wsTelemetry?.ml_pipeline?.engine_response || 'Nominal operation';
+  const recommendation = wsTelemetry?.ml_pipeline?.recommendation || 'Continuous parameter monitoring active.';
 
   // 4-Cylinder Head & Exhaust Gas Temperatures
   const cht = wsTelemetry?.cht_c || [telemetry.cht || 178, (telemetry.cht || 178) - 1.2, (telemetry.cht || 178) - 0.8, (telemetry.cht || 178) + 1.4];
@@ -84,6 +87,17 @@ export function ScreenEngine3DSimulation({ telemetry, wsTelemetry, isConnected, 
   const alternatorV = wsTelemetry?.alternator_v !== undefined ? wsTelemetry.alternator_v.toFixed(2) : '28.20';
   const ambientC = wsTelemetry?.ambient_c !== undefined ? wsTelemetry.ambient_c.toFixed(1) : '15.0';
   const altitudeM = wsTelemetry?.altitude_m !== undefined ? Math.round(wsTelemetry.altitude_m) : '1200';
+
+  const deltaEgtMax = wsTelemetry?.delta_egt_max !== undefined ? Number(wsTelemetry.delta_egt_max).toFixed(1) : (Math.max(...egt) - Math.min(...egt)).toFixed(1);
+  const deltaChtMax = wsTelemetry?.delta_cht_max !== undefined ? Number(wsTelemetry.delta_cht_max).toFixed(1) : (Math.max(...cht) - Math.min(...cht)).toFixed(1);
+  const vibCam = vibOrders.amp_cam_g !== undefined ? Number(vibOrders.amp_cam_g).toFixed(3) : '0.031';
+  const vib1x = vibOrders.amp_1x_g !== undefined ? Number(vibOrders.amp_1x_g).toFixed(3) : '0.051';
+  const vibFire = vibOrders.amp_fire_g !== undefined ? Number(vibOrders.amp_fire_g).toFixed(3) : '0.081';
+
+  // Ramp progress calculation
+  const rampTotal = Number(injectedFault.ramp_s) || 3.5;
+  const rampElapsed = Number(injectedFault.elapsed_s) || 0.0;
+  const rampProgressPct = Math.min(100, Math.max(0, (rampElapsed / rampTotal) * 100));
 
   // Interactive Control Handlers
   const handleStart = () => {
@@ -119,17 +133,6 @@ export function ScreenEngine3DSimulation({ telemetry, wsTelemetry, isConnected, 
     }
   };
 
-  const handleThresholdChange = (e) => {
-    const val = Number(e.target.value);
-    setDetectionThreshold(val);
-    if (sendCommand) {
-      sendCommand({
-        command: 'set_detection_threshold',
-        threshold: val / 100.0,
-      });
-    }
-  };
-
   const handleInjectFault = () => {
     if (sendCommand) {
       sendCommand({
@@ -138,7 +141,6 @@ export function ScreenEngine3DSimulation({ telemetry, wsTelemetry, isConnected, 
         severity: severityVal,
         cylinder: targetCylinder,
         ramp_s: rampDuration,
-        detection_threshold: detectionThreshold / 100.0,
         start_in_s: 0.0,
       });
     }
@@ -146,15 +148,6 @@ export function ScreenEngine3DSimulation({ telemetry, wsTelemetry, isConnected, 
 
   const handleClearFaults = () => {
     if (sendCommand) sendCommand({ command: 'clear_faults' });
-  };
-
-  // Helper for Stepper Stage Status
-  const getStageStatus = (stageKey) => {
-    const currentIdx = PIPELINE_STAGES.findIndex(s => s.key === stage);
-    const thisIdx = PIPELINE_STAGES.findIndex(s => s.key === stageKey);
-    if (stage === stageKey) return isDetected ? 'active alert' : 'active';
-    if (currentIdx > thisIdx) return 'completed';
-    return 'pending';
   };
 
   return (
@@ -173,7 +166,7 @@ export function ScreenEngine3DSimulation({ telemetry, wsTelemetry, isConnected, 
 
           <div className="s-3d-title-group">
             <h2 className="s-3d-main-title">ROTAX 914F 3D DIGITAL TWIN</h2>
-            <span className="s-3d-main-sub">IAI HERON / MALE UAV ENGINE SIMULATOR & FAULT PROGRESSION CORE</span>
+            <span className="s-3d-main-sub">IAI HERON / MALE UAV ENGINE SIMULATOR & PARAMETER-BASED DETECTION CORE</span>
           </div>
         </div>
 
@@ -184,7 +177,7 @@ export function ScreenEngine3DSimulation({ telemetry, wsTelemetry, isConnected, 
           </span>
           <span className="uav-badge uav-badge-cyan">4-CYL TURBOCHARGED</span>
           <span className="uav-badge uav-badge-cyan" style={{ background: 'rgba(46, 230, 166, 0.12)', borderColor: 'rgba(46, 230, 166, 0.4)' }}>
-            AI PREDICTIVE MAINTENANCE
+            PHYSICS-BASED RULE ENGINE
           </span>
         </div>
       </div>
@@ -222,7 +215,7 @@ export function ScreenEngine3DSimulation({ telemetry, wsTelemetry, isConnected, 
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', marginLeft: '8px' }}>
             <span style={{ color: 'var(--text-muted)' }}>STATUS:</span>
             <span style={{ color: isRunning ? 'var(--status-green)' : 'var(--status-orange)', fontWeight: 700 }}>
-              {isRunning ? 'RUNNING' : 'PAUSED'}
+              {isRunning ? 'RUNNING' : 'STANDBY / OFF'}
             </span>
             <span style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>(T: {simTime}s)</span>
           </div>
@@ -264,7 +257,7 @@ export function ScreenEngine3DSimulation({ telemetry, wsTelemetry, isConnected, 
         </div>
       </div>
 
-      {/* Configurable Simulation Control Panel (Requirement 10) */}
+      {/* Configurable Simulation Control Panel */}
       <div className="s-3d-sim-control-panel">
         <div className="sim-ctrl-row">
           {/* Fault Selector */}
@@ -274,16 +267,13 @@ export function ScreenEngine3DSimulation({ telemetry, wsTelemetry, isConnected, 
               value={selectedFault}
               onChange={(e) => setSelectedFault(e.target.value)}
               className="hud-select"
-              style={{ minWidth: '220px' }}
+              style={{ minWidth: '240px' }}
             >
-              <option value="misfire">1. Misfire (Cyl 1 Combustion Drop)</option>
-              <option value="injector_abnormalities">2. Injector Mismatch (Bank A/B)</option>
-              <option value="cooling_degradation">3. Cooling Heat Rejection Loss</option>
-              <option value="lubrication_issues">4. Lubrication Pressure Deficit</option>
-              <option value="sensor_drift">5. Sensor Inconsistency Drift</option>
-              <option value="combustion_instability">6. Combustion Cyclic Jitter</option>
-              <option value="overheating_trends">7. Overheating Thermal Spike</option>
-              <option value="abnormal_vibration">8. 1x/Cam Gearbox Vibration Spike</option>
+              {FAULT_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
             </select>
           </div>
 
@@ -321,9 +311,11 @@ export function ScreenEngine3DSimulation({ telemetry, wsTelemetry, isConnected, 
             ))}
           </div>
 
-          {/* Ramp Duration */}
+          {/* Ramp Duration (Controls ODE Progression Rate) */}
           <div className="sim-ctrl-group">
-            <span className="sim-ctrl-label">RAMP TIME:</span>
+            <span className="sim-ctrl-label" title="Controls how quickly physical fault effect develops in engine differential equations">
+              RAMP TIME:
+            </span>
             {[
               { label: '2.0s', val: 2.0 },
               { label: '3.5s', val: 3.5 },
@@ -334,6 +326,7 @@ export function ScreenEngine3DSimulation({ telemetry, wsTelemetry, isConnected, 
                 type="button"
                 className={`sim-pill-btn ${Math.abs(rampDuration - r.val) < 0.1 ? 'active' : ''}`}
                 onClick={() => setRampDuration(r.val)}
+                title={`Physical ODE progression ramp: ${r.val} seconds`}
               >
                 {r.label}
               </button>
@@ -342,20 +335,11 @@ export function ScreenEngine3DSimulation({ telemetry, wsTelemetry, isConnected, 
         </div>
 
         <div className="sim-ctrl-row" style={{ borderTop: '1px solid rgba(255, 255, 255, 0.06)', paddingTop: '8px' }}>
-          {/* Detection Confidence Threshold Slider */}
-          <div className="sim-ctrl-group" style={{ flex: '1', minWidth: '280px' }}>
-            <span className="sim-ctrl-label">DETECTION THRESHOLD:</span>
-            <input
-              type="range"
-              min="60"
-              max="95"
-              step="5"
-              value={detectionThreshold}
-              onChange={handleThresholdChange}
-              style={{ width: '130px', accentColor: 'var(--status-orange)', cursor: 'pointer' }}
-            />
-            <span style={{ fontSize: '11px', fontWeight: 700, color: 'var(--status-orange)', fontFamily: 'var(--font-mono)' }}>
-              {detectionThreshold}% CONFIDENCE REQUIRED
+          {/* Scientific Physics-Grounded Banner */}
+          <div style={{ flex: '1', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: 'var(--text-muted)' }}>
+            <span style={{ color: 'var(--accent-cyan)', fontWeight: 700 }}>🔬 PHYSICS-DRIVEN DETECTION:</span>
+            <span>
+              Fault injection initiates physical progression in engine ODEs. Detection occurs emergently when live parameters satisfy SIH-main PhysicsRuleEngine thresholds.
             </span>
           </div>
 
@@ -401,7 +385,7 @@ export function ScreenEngine3DSimulation({ telemetry, wsTelemetry, isConnected, 
           <EngineViewport telemetry={wsTelemetry || telemetry} />
         </div>
 
-        {/* Right Column: AI Diagnostics & Engine Telemetry Breakdown */}
+        {/* Right Column: Physics Diagnostics & Engine Telemetry Breakdown */}
         <div className="s-3d-sidebar-col">
           {/* PRIMARY CRITICAL METRIC 1: Live RTM (Running / Real-Time Monitoring Index) */}
           <div className={`rtm-hero-card ${rtmNum < 75 ? 'critical' : (rtmNum < 90 ? 'warning' : '')}`}>
@@ -481,145 +465,120 @@ export function ScreenEngine3DSimulation({ telemetry, wsTelemetry, isConnected, 
             </div>
           </div>
 
-          {/* ML PROGRESSION & REASONING PIPELINE HUD (Requirement 6) */}
-          <div className="s-3d-panel" style={{ borderLeft: isDetected ? '3px solid #ef4444' : '3px solid var(--accent-cyan)' }}>
+          {/* AUTHENTIC PARAMETER-BASED FAULT DETECTION & DIAGNOSTICS CARD (SIH-main SOURCE OF TRUTH) */}
+          <div
+            className="s-3d-panel"
+            style={{
+              borderLeft: isDetected
+                ? '3px solid #ef4444'
+                : '3px solid var(--accent-cyan)',
+              background: isDetected ? 'rgba(239, 68, 68, 0.04)' : 'var(--bg-panel)'
+            }}
+          >
             <div className="s-3d-panel-header">
-              <span>AI/ML PREDICTIVE DETECTION PIPELINE</span>
-              <span className={`uav-badge ${isDetected ? 'uav-badge-orange' : (stage === 'NORMAL' ? 'uav-badge-green' : 'uav-badge-cyan')}`} style={{ fontSize: '9px' }}>
-                {stage.replace('_', ' ')}
+              <span>PHYSICS RULE ENGINE // FAULT DIAGNOSTICS</span>
+              <span
+                className={`uav-badge ${
+                  isDetected
+                    ? 'uav-badge-orange'
+                    : (!isRunning ? 'uav-badge-gray' : 'uav-badge-green')
+                }`}
+                style={{
+                  fontSize: '9px',
+                  borderColor: isDetected ? '#ef4444' : undefined,
+                  color: isDetected ? '#ef4444' : undefined
+                }}
+              >
+                {!isRunning
+                  ? 'ENGINE STANDBY'
+                  : (isDetected ? 'RULE TRIGGERED' : 'NOMINAL')}
               </span>
             </div>
 
-            {/* 7-Stage Visual Stepper Breadcrumb */}
-            <div className="ml-pipeline-stepper">
-              {PIPELINE_STAGES.map((s, idx) => (
-                <React.Fragment key={s.key}>
-                  <div className={`ml-stepper-item ${getStageStatus(s.key)}`} title={s.desc}>
-                    {s.label}
-                  </div>
-                  {idx < PIPELINE_STAGES.length - 1 && (
-                    <span className="ml-stepper-arrow">›</span>
-                  )}
-                </React.Fragment>
-              ))}
-            </div>
-
-            {/* Pipeline Metrics Card */}
-            <div style={{ background: 'rgba(0, 0, 0, 0.25)', border: '1px solid rgba(255, 255, 255, 0.06)', borderRadius: '3px', padding: '10px', marginBottom: '8px' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '8px', fontSize: '11px', marginBottom: '8px' }}>
-                <div>
-                  <span style={{ color: 'var(--text-muted)', fontSize: '10px' }}>ENGINE PHYSICAL RESPONSE:</span>
-                  <div style={{ color: isDetected ? '#ff8888' : 'var(--text-primary)', fontWeight: 600 }}>
-                    {engineResponse}
-                  </div>
+            {/* STATE 1: Engine is Cold / Standby (Not Running) */}
+            {!isRunning && (
+              <div style={{ background: 'rgba(0, 0, 0, 0.25)', border: '1px solid rgba(255, 255, 255, 0.06)', borderRadius: '3px', padding: '10px' }}>
+                <div style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                  PROPULSION SYSTEM INACTIVE (STANDBY)
                 </div>
-                <div>
-                  <span style={{ color: 'var(--text-muted)', fontSize: '10px' }}>DETECTION LATENCY:</span>
-                  <div style={{ color: isDetected ? 'var(--status-orange)' : 'var(--text-dim)', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
-                    {latencyS}s {isDetected ? '(Threshold crossed)' : '(Accumulating)'}
-                  </div>
+                <div style={{ fontSize: '10.5px', color: 'var(--text-muted)', lineHeight: '1.4' }}>
+                  Engine ignition is OFF. Telemetry is idle at 0 RPM and 0.0 bar oil pressure. Press <strong style={{ color: 'var(--status-green)' }}>▶ RESUME</strong> to initiate engine rotation, fuel delivery, and thermodynamic physics simulation.
                 </div>
               </div>
+            )}
 
-              <div style={{ fontSize: '10.5px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
-                <span style={{ color: 'var(--text-muted)' }}>ML STATUS: </span>
-                <strong style={{ color: '#fff' }}>{mlStatus}</strong>
-              </div>
-
-              {/* Dynamic Anomaly Confidence Progress with Threshold Marker */}
-              <div style={{ marginBottom: '6px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '3px' }}>
-                  <span>ANOMALY CONFIDENCE: <strong style={{ color: isDetected ? '#ef4444' : 'var(--accent-cyan)', fontFamily: 'var(--font-mono)' }}>{mlConfPct}%</strong></span>
-                  <span>THRESHOLD: <strong style={{ color: 'var(--status-orange)', fontFamily: 'var(--font-mono)' }}>{thresholdPct}%</strong></span>
+            {/* STATE 2: Engine Running (No fault detected yet) */}
+            {isRunning && !isDetected && (
+              <div style={{ background: 'rgba(0, 0, 0, 0.25)', border: '1px solid rgba(255, 255, 255, 0.06)', borderRadius: '3px', padding: '10px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                  <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: 'var(--status-green)', boxShadow: '0 0 8px rgba(46, 230, 166, 0.6)' }} />
+                  <span style={{ fontSize: '11px', fontWeight: 700, color: 'var(--status-green)' }}>
+                    ALL PHYSICAL PARAMETERS NOMINAL
+                  </span>
                 </div>
-                <div style={{ position: 'relative', width: '100%', height: '8px', background: 'rgba(255, 255, 255, 0.08)', borderRadius: '4px', overflow: 'hidden' }}>
-                  {/* Threshold Guide Marker */}
-                  <div
-                    style={{
-                      position: 'absolute',
-                      left: `${thresholdPct}%`,
-                      top: 0,
-                      bottom: 0,
-                      width: '2px',
-                      background: 'rgba(245, 166, 35, 0.9)',
-                      zIndex: 2,
-                    }}
-                    title={`Detection Threshold: ${thresholdPct}%`}
-                  />
-                  {/* Confidence Fill */}
-                  <div
-                    style={{
-                      width: `${Math.min(100, Math.max(0, Number(mlConfPct)))}%`,
-                      height: '100%',
-                      background: isDetected
-                        ? '#ef4444'
-                        : (Number(mlConfPct) >= thresholdPct - 15 ? 'linear-gradient(90deg, #00e5ff, #f59e0b)' : 'var(--accent-cyan)'),
-                      transition: 'width 0.25s ease-out'
-                    }}
-                  />
+                <div style={{ fontSize: '10.5px', color: 'var(--text-secondary)', lineHeight: '1.4', marginBottom: '8px' }}>
+                  Thermodynamic, lubrication, and vibration parameters are within Rotax 914 certified flight tolerances.
+                </div>
+                <div style={{ fontSize: '10px', color: 'var(--text-dim)', borderTop: '1px solid rgba(255, 255, 255, 0.05)', paddingTop: '6px' }}>
+                  PhysicsRuleEngine actively evaluating: Misfire (ΔEGT, Vib_cam), Injector Balance, Cooling, Lubrication, Sensor Drift, and Harmonics.
                 </div>
               </div>
+            )}
 
-              {/* Actionable Maintenance Recommendation */}
-              {isDetected && (
-                <div style={{ background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: '3px', padding: '6px 8px', marginTop: '6px' }}>
-                  <div style={{ fontSize: '10px', fontWeight: 800, color: '#ff7777', letterSpacing: '0.04em' }}>
-                    RECOMMENDED ACTION:
+            {/* STATE 4: Fault Detected by PhysicsRuleEngine */}
+            {isDetected && (
+              <div style={{ background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.4)', borderRadius: '3px', padding: '10px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                  <span style={{ fontSize: '11px', fontWeight: 900, color: '#ef4444', letterSpacing: '0.04em' }}>
+                    ⚠ PHYSICAL FAULT DETECTED: {detectedFault.toUpperCase().replace('_', ' ')}
+                  </span>
+                  <span className="uav-badge" style={{ fontSize: '9px', background: 'rgba(239, 68, 68, 0.2)', color: '#ef4444', borderColor: '#ef4444' }}>
+                    RULE TRIGGERED
+                  </span>
+                </div>
+
+                {/* Trigger Message directly from SIH-main PhysicsRuleEngine */}
+                <div style={{ background: 'rgba(0, 0, 0, 0.35)', border: '1px solid rgba(239, 68, 68, 0.25)', borderRadius: '3px', padding: '6px 8px', marginBottom: '8px' }}>
+                  <span style={{ fontSize: '9.5px', color: 'var(--text-muted)', display: 'block', marginBottom: '2px' }}>
+                    PHYSICSRULEENGINE DETERMINISTIC TRIGGER:
+                  </span>
+                  <span style={{ fontSize: '11px', fontWeight: 700, color: '#ffaaaa', fontFamily: 'var(--font-mono)' }}>
+                    {ruleMsg}
+                  </span>
+                </div>
+
+                {/* Actual Parameter Readouts at Detection */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '4px', marginBottom: '8px', fontSize: '9.5px', fontFamily: 'var(--font-mono)' }}>
+                  <div style={{ background: 'rgba(255, 255, 255, 0.03)', padding: '4px', borderRadius: '2px' }}>
+                    <span style={{ color: 'var(--text-muted)', display: 'block' }}>ΔEGT CROSS</span>
+                    <strong style={{ color: '#ef4444', fontSize: '11px' }}>{deltaEgtMax} °C</strong>
+                  </div>
+                  <div style={{ background: 'rgba(255, 255, 255, 0.03)', padding: '4px', borderRadius: '2px' }}>
+                    <span style={{ color: 'var(--text-muted)', display: 'block' }}>CAM VIB</span>
+                    <strong style={{ color: '#ef4444', fontSize: '11px' }}>{vibCam} g</strong>
+                  </div>
+                  <div style={{ background: 'rgba(255, 255, 255, 0.03)', padding: '4px', borderRadius: '2px' }}>
+                    <span style={{ color: 'var(--text-muted)', display: 'block' }}>TOTAL RMS</span>
+                    <strong style={{ color: '#fff', fontSize: '11px' }}>{vibRms} g</strong>
+                  </div>
+                </div>
+
+                {/* 3D Component Target */}
+                <div style={{ fontSize: '10.5px', color: '#ffffff', marginBottom: '6px' }}>
+                  3D COMPONENT HIGHLIGHTED: <strong style={{ color: '#ff7777' }}>{getAffectedComponentName(detectedFault, injectedFault.cylinder || targetCylinder)}</strong>
+                </div>
+
+                {/* Actionable Maintenance Recommendation */}
+                <div style={{ background: 'rgba(239, 68, 68, 0.15)', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: '3px', padding: '6px 8px' }}>
+                  <div style={{ fontSize: '9.5px', fontWeight: 800, color: '#ff8888', letterSpacing: '0.04em' }}>
+                    RECOMMENDED MAINTENANCE ACTION:
                   </div>
                   <div style={{ fontSize: '10.5px', color: '#ffffff' }}>
                     {recommendation}
                   </div>
                 </div>
-              )}
-            </div>
-          </div>
-
-          {/* 3-Layer Hybrid AI/ML Diagnostics Strip */}
-          <div className="s-3d-panel">
-            <div className="s-3d-panel-header">
-              <span>3-LAYER HYBRID AI/ML DIAGNOSTICS</span>
-            </div>
-
-            <div className="s-3d-ai-strip">
-              {/* Layer 1 */}
-              <div className={`s-3d-ai-card ${l1Detected ? 'alert' : ''}`}>
-                <div className="s-3d-ai-card-top">
-                  <span className="s-3d-ai-name">L1 // PHYSICS RULES</span>
-                  <span className={`uav-badge ${l1Detected ? 'uav-badge-orange' : 'uav-badge-green'}`} style={{ fontSize: '9px' }}>
-                    {l1Detected ? 'ALERT' : 'NOMINAL'}
-                  </span>
-                </div>
-                <div className="s-3d-ai-desc">
-                  {l1Detected ? `Rule active: ${l1Fault.toUpperCase()} - ${l1Msg}` : 'Thermodynamic & oil pressure physics nominal'}
-                </div>
               </div>
-
-              {/* Layer 2 */}
-              <div className={`s-3d-ai-card ${l2Active ? 'alert' : ''}`}>
-                <div className="s-3d-ai-card-top">
-                  <span className="s-3d-ai-name">L2 // 8-FAULT CLASSIFIER</span>
-                  <span className={`uav-badge ${l2Active ? 'uav-badge-orange' : 'uav-badge-green'}`} style={{ fontSize: '9px' }}>
-                    {l2Active ? 'FAULT DETECTED' : 'HEALTHY'}
-                  </span>
-                </div>
-                <div className="s-3d-ai-desc">
-                  {l2Active ? `Classified: ${l2Fault.toUpperCase()} (${l2Conf}% confidence)` : 'Supervised neural classifier: Nominal baseline'}
-                </div>
-              </div>
-
-              {/* Layer 3 */}
-              <div className={`s-3d-ai-card ${l3Detected ? 'alert' : ''}`}>
-                <div className="s-3d-ai-card-top">
-                  <span className="s-3d-ai-name">L3 // AUTOENCODER NOVELTY</span>
-                  <span className={`uav-badge ${l3Detected ? 'uav-badge-orange' : 'uav-badge-green'}`} style={{ fontSize: '9px' }}>
-                    {l3Detected ? 'NOVEL ANOMALY' : 'NORMAL'}
-                  </span>
-                </div>
-                <div className="s-3d-ai-desc">
-                  Novelty Recon MSE: <strong style={{ color: '#fff' }}>{l3Error}</strong> (Threshold: 0.0631)
-                </div>
-              </div>
-            </div>
+            )}
           </div>
 
           {/* 4-Cylinder Thermal Breakdown Table */}
@@ -631,11 +590,10 @@ export function ScreenEngine3DSimulation({ telemetry, wsTelemetry, isConnected, 
 
             <div className="s-3d-cyl-table">
               {[0, 1, 2, 3].map((idx) => {
-                const c = Number(cht[idx] || 178).toFixed(1);
-                const e = Number(egt[idx] || 642).toFixed(0);
-                const d = Number(deltaChtAmbient[idx] || 37).toFixed(1);
+                const c = Number(cht[idx] || (isRunning ? 178 : 22)).toFixed(1);
+                const e = Number(egt[idx] || (isRunning ? 642 : 22)).toFixed(0);
                 const isHot = Number(c) > 200;
-                const isEgtDropped = isDetected && detectedFault === 'misfire' && idx === 0;
+                const isEgtDropped = isDetected && detectedFault === 'misfire' && idx === (injectedFault.cylinder ?? targetCylinder);
 
                 return (
                   <div key={idx} className={`s-3d-cyl-box ${isHot ? 'hot' : ''}`} style={isEgtDropped ? { borderColor: '#ef4444', background: 'rgba(239, 68, 68, 0.08)' } : {}}>
@@ -657,26 +615,26 @@ export function ScreenEngine3DSimulation({ telemetry, wsTelemetry, isConnected, 
             </div>
           </div>
 
-          {/* COMPACT SECONDARY TELEMETRY GRID (Requirement 1) */}
+          {/* COMPACT SECONDARY TELEMETRY GRID */}
           <div className="s-3d-panel">
             <div className="s-3d-panel-header">
               <span>ENGINE SENSOR TELEMETRY</span>
-              <span style={{ fontSize: '9.5px', color: 'var(--text-muted)' }}>CALIBRATED METRICS</span>
+              <span style={{ fontSize: '9.5px', color: 'var(--text-muted)' }}>CALIBRATED SENSORS</span>
             </div>
 
             <div className="s-3d-secondary-grid">
               {/* Oil Pressure */}
-              <div className={`s-3d-secondary-item ${Number(oilPress) < 2.5 ? 'critical' : ''}`}>
+              <div className={`s-3d-secondary-item ${isRunning && Number(oilPress) < 2.5 ? 'critical' : ''}`}>
                 <span style={{ color: 'var(--text-muted)' }}>OIL PRESSURE</span>
-                <strong style={{ color: Number(oilPress) < 2.5 ? '#ef4444' : 'var(--text-primary)' }}>
+                <strong style={{ color: isRunning && Number(oilPress) < 2.5 ? '#ef4444' : 'var(--text-primary)' }}>
                   {oilPress} bar
                 </strong>
               </div>
 
               {/* Oil Temperature */}
-              <div className={`s-3d-secondary-item ${Number(oilTemp) > 105 ? 'warning' : ''}`}>
+              <div className={`s-3d-secondary-item ${isRunning && Number(oilTemp) > 105 ? 'warning' : ''}`}>
                 <span style={{ color: 'var(--text-muted)' }}>OIL TEMP</span>
-                <strong style={{ color: Number(oilTemp) > 105 ? 'var(--status-orange)' : 'var(--text-primary)' }}>
+                <strong style={{ color: isRunning && Number(oilTemp) > 105 ? 'var(--status-orange)' : 'var(--text-primary)' }}>
                   {oilTemp} °C
                 </strong>
               </div>
@@ -714,9 +672,9 @@ export function ScreenEngine3DSimulation({ telemetry, wsTelemetry, isConnected, 
               </div>
 
               {/* Vibration Total RMS */}
-              <div className={`s-3d-secondary-item ${Number(vibRms) > 1.2 ? 'critical' : (Number(vibRms) > 0.95 ? 'warning' : '')}`}>
+              <div className={`s-3d-secondary-item ${isRunning && Number(vibRms) > 1.2 ? 'critical' : (isRunning && Number(vibRms) > 0.95 ? 'warning' : '')}`}>
                 <span style={{ color: 'var(--text-muted)' }}>TOTAL VIB RMS</span>
-                <strong style={{ color: Number(vibRms) > 1.2 ? '#ef4444' : 'var(--status-green)' }}>
+                <strong style={{ color: isRunning && Number(vibRms) > 1.2 ? '#ef4444' : 'var(--status-green)' }}>
                   {vibRms} g
                 </strong>
               </div>
@@ -732,7 +690,7 @@ export function ScreenEngine3DSimulation({ telemetry, wsTelemetry, isConnected, 
               {/* Alternator Bus */}
               <div className="s-3d-secondary-item">
                 <span style={{ color: 'var(--text-muted)' }}>ALTERNATOR BUS</span>
-                <strong style={{ color: 'var(--status-green)' }}>
+                <strong style={{ color: isRunning ? 'var(--status-green)' : 'var(--text-dim)' }}>
                   {alternatorV} V
                 </strong>
               </div>

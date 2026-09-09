@@ -163,86 +163,22 @@ class EngineSimulationService:
         self.latest_outputs: Dict[str, Any] = {}
         self.latest_telemetry: Dict[str, Any] = {}
         self.fault_records: List[Dict[str, Any]] = []
+        self.injected_fault: Optional[Dict[str, Any]] = None
 
-        # ML Diagnostics & Health Monitoring
+        # Rule Engine (Source of Truth for Parameter-Based Detection)
         self.rule_engine = PhysicsRuleEngine()
         self.health_index = 1.0
-        self.telemetry_buffer = deque(maxlen=15)
-
-        # ML Pipeline Progression State Machine
-        self.ml_pipeline: Dict[str, Any] = {
-            "stage": "NORMAL",                # NORMAL | INJECTED | PROPAGATING | DATA_COLLECTION | ML_ANALYZING | ANOMALY_DETECTED | FAULT_CLASSIFIED
-            "stage_index": 0,
-            "stage_label": "Normal Baseline Envelope",
-            "injected_fault": "none",
-            "target_cylinder": 0,
-            "severity_label": "Normal",
-            "severity": 0.0,
-            "ramp_s": 3.5,
-            "detection_threshold": 0.80,
-            "injection_sim_t": 0.0,
-            "elapsed_since_injection_s": 0.0,
-            "propagation_pct": 0.0,
-            "telemetry_deviation_pct": 0.0,
-            "ml_confidence_pct": 1.5,
-            "detected_fault": "none",
-            "is_detected": False,
-            "affected_component": "none",
-            "engine_response": "Nominal Baseline",
-            "ml_status": "Monitoring live telemetry stream",
-            "recommendation": "Engine running nominally. Continuous predictive monitoring active.",
-            "detection_latency_s": 0.0,
-        }
-        self.consecutive_anom_frames: int = 0
-
-        # Retain Layer 2 and Layer 3 ML models in memory
-        self.classifier: Optional[MultiClassFaultClassifier] = None
-        self.autoencoder: Optional[AutoencoderAnomalyDetector] = None
-        self._train_ml_models()
-
-        self.last_ml_eval_time = 0.0
-        self.cached_layer2_pred = "none"
-        self.cached_layer2_conf = 1.0
-        self.cached_layer3_anom = False
-        self.cached_layer3_recon = 0.0
+        self.telemetry_buffer = deque(maxlen=20)
 
         self.latest_diagnosis: Dict[str, Any] = {
             "anomaly_detected": False,
             "fault_type": "none",
-            "message": "Nominal operation",
+            "message": "Engine OFF / Standby",
             "health_index": 1.0,
-            "layer2_predicted_fault": "none",
-            "layer2_confidence": 1.0,
-            "layer3_anomaly_detected": False,
-            "layer3_reconstruction_error": 0.0,
         }
 
         # Background runner handle
         self._task: Optional[asyncio.Task] = None
-
-    def _train_ml_models(self):
-        """Loads historical diagnosed telemetry and trains Layer 2 and Layer 3 models at startup."""
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        csv_path = os.path.join(base_dir, "engine_telemetry_diagnosed.csv")
-        if not os.path.exists(csv_path):
-            csv_path = os.path.join(base_dir, "engine_telemetry.csv")
-
-        logger.info(f"[ML Startup] Loading dataset for model training from: {csv_path}")
-        df = pd.read_csv(csv_path)
-
-        # Train Autoencoder (Layer 3) on healthy rows only
-        df_normal = df[df["injected_fault_type"] == "none"]
-        logger.info(f"[ML Startup] Training AutoencoderAnomalyDetector (Layer 3) on {len(df_normal)} healthy baseline samples...")
-        self.autoencoder = AutoencoderAnomalyDetector()
-        self.autoencoder.fit(df_normal)
-        logger.info(f"[ML Startup] Autoencoder fitted. Baseline MSE: {self.autoencoder.train_mean_error_:.5f}, Threshold: {self.autoencoder.threshold_:.5f}")
-
-        # Train MultiClassFaultClassifier (Layer 2) on full labeled dataset
-        logger.info(f"[ML Startup] Training MultiClassFaultClassifier (Layer 2) on {len(df)} operational samples...")
-        self.classifier = MultiClassFaultClassifier()
-        self.classifier.fit(df)
-        logger.info(f"[ML Startup] MultiClassFaultClassifier fitted. Classes ({len(self.classifier.model.classes_)}): {list(self.classifier.model.classes_)}")
-        logger.info("[ML Startup] Both models trained successfully and ready in memory.")
 
     def start(self):
         if self._task is None or self._task.done():
@@ -258,76 +194,43 @@ class EngineSimulationService:
         self.y = specs_idle_state(self.specs)
         self.faults = FaultInjector()
         self.fault_records.clear()
+        self.injected_fault = None
         self.sensor_noise.clear_sensor_biases()
         self.twin = RotaxDigitalTwin(specs=self.specs, faults=self.faults)
         self.mission.clear_manual()
         self.health_index = 1.0
         self.telemetry_buffer.clear()
-        self.last_ml_eval_time = 0.0
-        self.cached_layer2_pred = "none"
-        self.cached_layer2_conf = 1.0
-        self.cached_layer3_anom = False
-        self.cached_layer3_recon = 0.0
-        self.consecutive_anom_frames = 0
         self.sim_speed = 1.0
-
-        self.ml_pipeline = {
-            "stage": "NORMAL",
-            "stage_index": 0,
-            "stage_label": "Normal Baseline Envelope",
-            "injected_fault": "none",
-            "target_cylinder": 0,
-            "severity_label": "Normal",
-            "severity": 0.0,
-            "ramp_s": 3.5,
-            "detection_threshold": 0.80,
-            "injection_sim_t": 0.0,
-            "elapsed_since_injection_s": 0.0,
-            "propagation_pct": 0.0,
-            "telemetry_deviation_pct": 0.0,
-            "ml_confidence_pct": 1.5,
-            "detected_fault": "none",
-            "is_detected": False,
-            "affected_component": "none",
-            "engine_response": "Nominal Baseline",
-            "ml_status": "Monitoring live telemetry stream",
-            "recommendation": "Engine running nominally. Continuous predictive monitoring active.",
-            "detection_latency_s": 0.0,
-        }
+        self.is_running = False
 
         self.latest_diagnosis = {
             "anomaly_detected": False,
             "fault_type": "none",
-            "message": "Nominal operation",
+            "message": "Engine OFF / Standby",
             "health_index": 1.0,
-            "layer2_predicted_fault": "none",
-            "layer2_confidence": 1.0,
-            "layer3_anomaly_detected": False,
-            "layer3_reconstruction_error": 0.0,
         }
-        self.is_running = False  # Explicitly pause simulation on reset
         snap = self.get_current_snapshot()
-        snap["is_running"] = False
-        snap["active_faults"] = []
-        snap["active_faults_count"] = 0
-        snap["health_index"] = 1.0
         self.latest_telemetry = snap
-        logger.info("Engine simulation reset to cold/idle state (paused).")
+        logger.info("Engine simulation reset to cold standby state (paused).")
 
     def inject_fault(self, cmd: FaultInjectionCommand) -> Dict[str, Any]:
         kind_map = {
-            "lubrication_issue": "lubrication_issues",
-            "lubrication_issues": "lubrication_issues",
-            "injector_abnormal": "injector_abnormalities",
-            "injector_abnormalities": "injector_abnormalities",
-            "overheating_trend": "overheating_trends",
-            "overheating_trends": "overheating_trends",
+            "misfire": "misfire",
+            "injector_abnormal": "injector_abnormal",
+            "injector_abnormalities": "injector_abnormal",
+            "cooling_degradation": "cooling_degradation",
+            "lubrication_issue": "lubrication_issue",
+            "lubrication_issues": "lubrication_issue",
+            "sensor_drift": "sensor_drift",
+            "combustion_instability": "combustion_instability",
+            "overheating_trend": "overheating_trend",
+            "overheating_trends": "overheating_trend",
+            "abnormal_vibration": "abnormal_vibration",
         }
         normalized_kind = kind_map.get(cmd.kind, cmd.kind)
         start_time = self.t + cmd.start_in_s
         target_cyl = cmd.cylinder if cmd.cylinder is not None else 0
-        ramp_duration = float(cmd.ramp_s if cmd.ramp_s > 0.1 else 3.5)
-        threshold = getattr(cmd, "detection_threshold", 0.80) or 0.80
+        ramp_duration = float(cmd.ramp_s) if cmd.ramp_s and cmd.ramp_s > 0.05 else 3.5
 
         if normalized_kind == "sensor_drift":
             self.sensor_noise.set_sensor_bias(f"cht_{target_cyl + 1}", 45.0)
@@ -340,6 +243,7 @@ class EngineSimulationService:
             ramp_s=ramp_duration,
             **cmd.extra
         )
+
         record = {
             "id": len(self.fault_records) + 1,
             "kind": normalized_kind,
@@ -347,147 +251,63 @@ class EngineSimulationService:
             "severity": cmd.severity,
             "cylinder": target_cyl,
             "ramp_s": ramp_duration,
-            "detection_threshold": threshold,
             "extra": cmd.extra,
             "injected_at_sim_t": round(self.t, 2)
         }
         self.fault_records.append(record)
-        self.last_ml_eval_time = 0.0
-        self.consecutive_anom_frames = 0
-
-        # Stage 1: INJECTED (Decoupled from ML detection)
-        sev_label = "Low" if cmd.severity <= 0.55 else ("High" if cmd.severity >= 0.85 else "Medium")
-        self.ml_pipeline = {
-            "stage": "INJECTED",
-            "stage_index": 1,
-            "stage_label": "Fault Injected (Propagation Latency Window)",
-            "injected_fault": normalized_kind,
-            "target_cylinder": target_cyl,
-            "severity_label": sev_label,
+        self.injected_fault = {
+            "kind": normalized_kind,
+            "cylinder": target_cyl,
             "severity": cmd.severity,
             "ramp_s": ramp_duration,
-            "detection_threshold": threshold,
-            "injection_sim_t": round(self.t, 2),
-            "elapsed_since_injection_s": 0.0,
-            "propagation_pct": 0.0,
-            "telemetry_deviation_pct": 1.4,
-            "ml_confidence_pct": 14.2,
-            "detected_fault": "none",
-            "is_detected": False,
-            "affected_component": "none",
-            "engine_response": f"Injecting {normalized_kind.upper()} trajectory on Cylinder {target_cyl + 1}...",
-            "ml_status": "Telemetry within nominal threshold. Latency window accumulating.",
-            "recommendation": "Telemetry monitoring active. Awaiting sufficient abnormal pattern progression.",
-            "detection_latency_s": 0.0,
+            "start_t": start_time,
+            "injected_at_sim_t": round(self.t, 2),
         }
-        logger.info(f"Injected fault: {record} with ramp_s={ramp_duration}, threshold={threshold}")
+        logger.info(f"Injected fault: {record} with ramp_s={ramp_duration}s (Physical severity will ramp gradually)")
         return record
 
     def clear_faults(self):
         self.faults = FaultInjector()
         self.fault_records.clear()
+        self.injected_fault = None
         self.sensor_noise.clear_sensor_biases()
         self.twin.faults = self.faults
-        self.last_ml_eval_time = 0.0
-        self.cached_layer2_pred = "none"
-        self.cached_layer2_conf = 1.0
-        self.cached_layer3_anom = False
-        self.cached_layer3_recon = 0.0
-        self.consecutive_anom_frames = 0
-
-        self.ml_pipeline = {
-            "stage": "NORMAL",
-            "stage_index": 0,
-            "stage_label": "Normal Baseline Envelope",
-            "injected_fault": "none",
-            "target_cylinder": 0,
-            "severity_label": "Normal",
-            "severity": 0.0,
-            "ramp_s": 3.5,
-            "detection_threshold": 0.80,
-            "injection_sim_t": 0.0,
-            "elapsed_since_injection_s": 0.0,
-            "propagation_pct": 0.0,
-            "telemetry_deviation_pct": 0.0,
-            "ml_confidence_pct": 1.5,
-            "detected_fault": "none",
-            "is_detected": False,
-            "affected_component": "none",
-            "engine_response": "Nominal Baseline",
-            "ml_status": "Monitoring live telemetry stream",
-            "recommendation": "Engine running nominally. Continuous predictive monitoring active.",
-            "detection_latency_s": 0.0,
-        }
 
         self.latest_diagnosis = {
             "anomaly_detected": False,
             "fault_type": "none",
             "message": "Nominal operation",
             "health_index": round(float(self.health_index), 4),
-            "layer2_predicted_fault": "none",
-            "layer2_confidence": 1.0,
-            "layer3_anomaly_detected": False,
-            "layer3_reconstruction_error": 0.0,
         }
         if self.latest_telemetry:
             self.latest_telemetry["active_faults"] = []
             self.latest_telemetry["active_faults_count"] = 0
-            self.latest_telemetry["ml_pipeline"] = copy.deepcopy(self.ml_pipeline)
             if "diagnostics" in self.latest_telemetry:
                 self.latest_telemetry["diagnostics"]["ml_diagnostics"] = self.latest_diagnosis
-        logger.info("Cleared all injected faults.")
+        logger.info("Cleared all injected faults. Engine returning to physical baseline.")
 
     def _diagnose_snapshot(self, out: Dict[str, Any], telemetry: Dict[str, Any]) -> Dict[str, Any]:
-        """Runs Physics rules (Layer 1), Supervised Classifier (Layer 2), and Autoencoder (Layer 3)."""
-        # Guard: if engine is not running or at idle below the dataset training floor (~1700 RPM)
-        if (not self.is_running or float(telemetry.get("rpm", 0.0)) < 1700.0) and len(self.fault_records) == 0:
-            self.cached_layer2_pred = "none"
-            self.cached_layer2_conf = 1.0
-            self.cached_layer3_anom = False
-            self.cached_layer3_recon = 0.0018
-            self.ml_pipeline["stage"] = "NORMAL"
-            self.ml_pipeline["stage_index"] = 0
-            self.ml_pipeline["stage_label"] = "Nominal Baseline (Engine Cold / Paused)"
-            self.ml_pipeline["engine_response"] = "Engine paused / idle warmup"
-            self.ml_pipeline["ml_status"] = "Baseline standby"
-            self.ml_pipeline["is_detected"] = False
-            self.ml_pipeline["detected_fault"] = "none"
-            self.ml_pipeline["affected_component"] = "none"
+        """Runs PhysicsRuleEngine deterministic parameter evaluation on simulated telemetry."""
+        # Guard: If engine is OFF / cold standby, no combustion, thermal, or vibration fault exists
+        if not self.is_running or float(telemetry.get("rpm", 0.0)) < 100.0:
             self.latest_diagnosis = {
                 "anomaly_detected": False,
                 "fault_type": "none",
-                "message": "Nominal operation (Engine cold / paused)" if not self.is_running else "Nominal idle warmup",
-                "health_index": round(float(self.health_index), 5),
-                "layer2_predicted_fault": "none",
-                "layer2_confidence": 1.0,
-                "layer3_anomaly_detected": False,
-                "layer3_reconstruction_error": 0.0018,
+                "message": "Engine OFF / Standby" if not self.is_running else "Engine Idle Standby",
+                "health_index": 1.0,
             }
             return self.latest_diagnosis
 
         mu = vogel_viscosity(telemetry["oil_temp_c"])
         p_oil_pa = telemetry["oil_pressure_bar"] * 1e5
         p_oil_nominal_pa = 4.1e5
+        t_nom_c = 95.0
+        k_wear = 2e-13
 
-        # Continuous real-time wear & tear calculation
-        baseline_wear = 0.00008 * self.step_dt * (telemetry["rpm"] / 4500.0) * (telemetry["oil_temp_c"] / 85.0)
-        fault_damage_multiplier = 1.0
-        if p_oil_pa < p_oil_nominal_pa:
-            pressure_deficit = (p_oil_nominal_pa - p_oil_pa) / p_oil_nominal_pa
-            fault_damage_multiplier += 110.0 * pressure_deficit
-
-        if telemetry["oil_temp_c"] > 95.0:
-            fault_damage_multiplier += 35.0 * ((telemetry["oil_temp_c"] - 95.0) / 20.0)
-
-        vib_rms = telemetry.get("vibration_rms_g", 0.8)
-        if vib_rms > 1.2:
-            fault_damage_multiplier += 40.0 * (vib_rms - 1.2)
-
-        if len(self.fault_records) > 0:
-            fault_damage_multiplier += 18.0 * len(self.fault_records)
-
-        wear_increment = baseline_wear * fault_damage_multiplier
-        self.health_index = max(0.0, self.health_index - wear_increment)
+        self.health_index = health_index_step(
+            self.health_index, p_oil_pa, p_oil_nominal_pa,
+            telemetry["oil_temp_c"], t_nom_c, self.step_dt, k_wear
+        )
 
         delta_egt_current = max(telemetry["egt_c"]) - min(telemetry["egt_c"])
         max_cht_current = max(telemetry["cht_c"])
@@ -535,12 +355,12 @@ class EngineSimulationService:
         v_fcam = float(vib.get("amp_cam_g", 0.03))
         v_ffire = float(vib.get("amp_fire_g", 0.08))
         v_total = float(vib.get("rms_g", telemetry.get("vibration_rms_g", 0.8)))
-        f0_clip = max(v_f0, 0.05)
 
-        # Layer 1: Physics-informed rule check
+        # Physics-informed parameter series (passed to PhysicsRuleEngine)
         row_s = pd.Series({
             "RPM": float(telemetry["rpm"]),
             "Oil_Pressure_bar": float(telemetry["oil_pressure_bar"]),
+            "Oil_Temp_C": float(telemetry["oil_temp_c"]),
             "Oil_Viscosity_Pa_s": float(mu),
             "CHT_C": float(max_cht_current),
             "Delta_CHT_ambient_C": float(max_cht_current - telemetry["ambient_c"]),
@@ -560,216 +380,30 @@ class EngineSimulationService:
             "Vib_Amp_ffire_g": float(v_ffire),
             "RPM_instability_std": float(rpm_instability_std),
             "Rate_of_Rise_CHT_C_per_min": float(rate_of_rise_cht),
-            "mission_phase": "Cruise_Loiter",
+            "mission_phase": "Cruise_Loiter" if self.is_running else "Standby",
             "Health_Index": float(self.health_index),
         })
+
+        # Evaluate physical deterministic rules (SIH-main source of truth)
         diag = self.rule_engine.diagnose_row(row_s)
-
-        # ====================================================================
-        # ML Inference & Progression State Machine (Decoupled from Button)
-        # ====================================================================
-        now = time.perf_counter()
-        active_fault_kind = self.fault_records[-1]["kind"] if self.fault_records else None
-        target_cyl = self.fault_records[-1]["cylinder"] if self.fault_records else 0
-
-        # Evaluate ML models (Layer 2 & 3)
-        ae_err_val = 0.0021
-        pred_label = "none"
-        classifier_conf = 1.0
-
-        if (now - self.last_ml_eval_time >= 0.25) and self.classifier is not None and self.autoencoder is not None:
-            try:
-                features_dict = {
-                    "RPM": float(telemetry["rpm"]),
-                    "MAP_hPa": float(out.get("map_pa", 101325.0)) / 100.0,
-                    "m_dot_a_kg_s": float(out.get("m_dot_a_kg_s", telemetry["fuel_flow_kg_s"] * 14.7)),
-                    "m_dot_f_kg_s": float(telemetry["fuel_flow_kg_s"]),
-                    "Q_fuel_L_s": float(telemetry["fuel_flow_kg_s"]) / 0.72,
-                    "AFR_actual": float(np.mean(out.get("afr_cyl", [14.7]*4))),
-                    "phi_equivalence_ratio": float(np.mean(out.get("phi_cyl", [1.0]*4))),
-                    "EGT_avg_C": float(np.mean(telemetry["egt_c"])),
-                    "Delta_EGT_cross_roll3": delta_egt_roll3,
-                    "CHT_C": max_cht_current,
-                    "Delta_CHT_ambient_C": max_cht_current - float(telemetry["ambient_c"]),
-                    "Oil_Temp_C": float(telemetry["oil_temp_c"]),
-                    "Oil_Pressure_bar": float(telemetry["oil_pressure_bar"]),
-                    "Oil_Viscosity_Pa_s": float(mu),
-                    "Ratio_Lube": float(out.get("ratio_lube", (telemetry["oil_pressure_bar"] * 1e5) / max(mu, 1e-9))),
-                    "P_oil_residual_ratio": p_oil_ratio,
-                    "Health_Index_deficit": float(1.0 - self.health_index),
-                    "Bank_Fuel_Mismatch_ratio": bank_mismatch,
-                    "RPM_instability_std": rpm_instability_std,
-                    "Vib_Amp_Total_g": v_total,
-                    "Vib_Amp_f0_g": v_f0,
-                    "Vib_Amp_fcam_g": v_fcam,
-                    "Vib_Amp_ffire_g": v_ffire,
-                    "Vib_Ratio_cam_f0": round(v_fcam / f0_clip, 3),
-                    "Vib_Ratio_fire_f0": round(v_ffire / f0_clip, 3),
-                    "Rate_of_Rise_CHT_C_per_min": round(rate_of_rise_cht, 2),
-                }
-                df_ml = pd.DataFrame([features_dict], columns=ML_FEATURE_COLS)
-
-                preds, probs, _ = self.classifier.predict_with_logits(df_ml)
-                pred_label = str(preds[0])
-                classifier_conf = round(float(np.max(probs[0])), 4)
-
-                ae_anom, ae_err = self.autoencoder.predict_anomalies(df_ml)
-                ae_err_val = float(ae_err[0])
-                self.last_ml_eval_time = now
-            except Exception as ex:
-                logger.debug(f"Error evaluating ML pipeline: {ex}")
-
-        # Update Progressive ML Pipeline state
-        if not active_fault_kind:
-            # Stage 0: NORMAL BASELINE
-            self.ml_pipeline["stage"] = "NORMAL"
-            self.ml_pipeline["stage_index"] = 0
-            self.ml_pipeline["stage_label"] = "Normal Baseline Envelope"
-            self.ml_pipeline["injected_fault"] = "none"
-            self.ml_pipeline["is_detected"] = False
-            self.ml_pipeline["detected_fault"] = "none"
-            self.ml_pipeline["affected_component"] = "none"
-            self.ml_pipeline["engine_response"] = "Nominal Baseline"
-            self.ml_pipeline["ml_status"] = "Monitoring live telemetry stream"
-            self.ml_pipeline["recommendation"] = "Engine running nominally. Continuous predictive monitoring active."
-            self.ml_pipeline["ml_confidence_pct"] = round(float(np.random.uniform(1.2, 3.4)), 1)
-            self.ml_pipeline["telemetry_deviation_pct"] = round(float(np.random.uniform(0.8, 2.1)), 1)
-            self.ml_pipeline["propagation_pct"] = 0.0
-            self.ml_pipeline["elapsed_since_injection_s"] = 0.0
-            self.consecutive_anom_frames = 0
-
-            self.cached_layer2_pred = "none"
-            self.cached_layer2_conf = 1.0
-            self.cached_layer3_anom = False
-            self.cached_layer3_recon = round(ae_err_val, 5)
-        else:
-            # A fault has been introduced — compute realistic time-series progression
-            t_inj = self.ml_pipeline.get("injection_sim_t", self.t)
-            dt_inj = max(0.0, self.t - t_inj)
-            ramp_s = max(0.2, self.ml_pipeline.get("ramp_s", 3.5))
-            ramp_frac = min(1.0, dt_inj / ramp_s)
-            severity = float(self.ml_pipeline.get("severity", 0.85))
-            threshold_pct = float(self.ml_pipeline.get("detection_threshold", 0.80)) * 100.0
-
-            # Calculate physical telemetry deviation percentage
-            delta_egt_ratio = min(1.0, delta_egt_current / 150.0)
-            vib_ratio = min(1.0, max(0.0, (v_total - 0.78) / 0.75))
-            rpm_instab_ratio = min(1.0, max(0.0, (rpm_instability_std - 12.0) / 60.0))
-            phys_dev = 0.45 * delta_egt_ratio + 0.35 * vib_ratio + 0.20 * rpm_instab_ratio
-
-            jitter_dev = float(np.random.normal(0, 0.5))
-            telemetry_dev_pct = min(98.5, max(1.5, (phys_dev * 0.75 + ramp_frac * severity * 0.25) * 100.0 + jitter_dev))
-
-            # Dynamic ML Confidence Score climbing smoothly across the threshold
-            base_growth = (ramp_frac ** 1.25) * (severity / 0.82)
-            ae_boost = 0.18 if ae_err_val > 0.04 else (0.10 if ae_err_val > 0.025 else 0.0)
-            confidence_val = min(0.985, max(0.08, 0.14 + 0.78 * base_growth + ae_boost))
-            ml_conf_pct = round(confidence_val * 100.0, 1)
-
-            self.ml_pipeline["elapsed_since_injection_s"] = round(dt_inj, 1)
-            self.ml_pipeline["propagation_pct"] = round(ramp_frac * 100.0, 1)
-            self.ml_pipeline["telemetry_deviation_pct"] = round(telemetry_dev_pct, 1)
-            self.ml_pipeline["ml_confidence_pct"] = ml_conf_pct
-
-            # 7-Stage State Progression Logic
-            if dt_inj < 0.8:
-                # Stage 1: INJECTED (Latency window — ML has not detected anomaly yet)
-                self.ml_pipeline["stage"] = "INJECTED"
-                self.ml_pipeline["stage_index"] = 1
-                self.ml_pipeline["stage_label"] = "Fault Injected (Propagation Latency Window)"
-                self.ml_pipeline["engine_response"] = f"Initiating {active_fault_kind.upper()} trajectory on Cylinder {target_cyl + 1}..."
-                self.ml_pipeline["ml_status"] = "Sensor telemetry within baseline noise floor. Accumulating time-series data."
-                self.ml_pipeline["is_detected"] = False
-                self.ml_pipeline["detected_fault"] = "none"
-                self.ml_pipeline["affected_component"] = "none"
-                self.consecutive_anom_frames = 0
-                self.cached_layer2_pred = "none"
-                self.cached_layer2_conf = round(1.0 - (ml_conf_pct / 100.0), 4)
-                self.cached_layer3_anom = False
-                self.cached_layer3_recon = round(ae_err_val, 5)
-
-            elif ml_conf_pct < threshold_pct:
-                # Stage 2 or 3: PROPAGATING / ML_ANALYZING
-                self.ml_pipeline["is_detected"] = False
-                self.ml_pipeline["detected_fault"] = "none"
-                self.ml_pipeline["affected_component"] = "none"
-                self.consecutive_anom_frames = 0
-
-                if dt_inj < ramp_s * 0.55:
-                    self.ml_pipeline["stage"] = "PROPAGATING"
-                    self.ml_pipeline["stage_index"] = 2
-                    self.ml_pipeline["stage_label"] = "Physical Degradation Propagating"
-                    self.ml_pipeline["engine_response"] = "Thermal & vibration signatures gradually deviating from baseline"
-                    self.ml_pipeline["ml_status"] = "Anomalous sensor drift detected. Filling rolling time-series window."
-                else:
-                    self.ml_pipeline["stage"] = "ML_ANALYZING"
-                    self.ml_pipeline["stage_index"] = 3
-                    self.ml_pipeline["stage_label"] = "ML Neural Analyzing & Feature Extraction"
-                    self.ml_pipeline["engine_response"] = "Cyclic combustion asymmetry and vibration order elevation developing"
-                    self.ml_pipeline["ml_status"] = f"Autoencoder reconstruction error ({ae_err_val:.4f}) rising toward threshold ({threshold_pct:.0f}% target)"
-
-                self.cached_layer2_pred = "none"
-                self.cached_layer2_conf = round(1.0 - (ml_conf_pct / 100.0), 4)
-                self.cached_layer3_anom = False
-                self.cached_layer3_recon = round(ae_err_val, 5)
-
-            else:
-                # Confidence >= threshold_pct: Stage 4 (ANOMALY_DETECTED) -> Stage 5 (FAULT_CLASSIFIED)
-                self.consecutive_anom_frames += 1
-                if self.consecutive_anom_frames >= 2:
-                    if not self.ml_pipeline["is_detected"]:
-                        self.ml_pipeline["detection_latency_s"] = round(dt_inj, 1)
-
-                    self.ml_pipeline["stage"] = "FAULT_CLASSIFIED"
-                    self.ml_pipeline["stage_index"] = 5
-                    self.ml_pipeline["stage_label"] = "Anomaly Confirmed & Fault Classified"
-                    self.ml_pipeline["engine_response"] = f"Confirmed signature: {active_fault_kind.upper()} on Cylinder {target_cyl + 1}"
-                    self.ml_pipeline["ml_status"] = f"Classifier & Autoencoder verified: {active_fault_kind.upper()} ({ml_conf_pct:.1f}% confidence)"
-                    self.ml_pipeline["is_detected"] = True
-                    self.ml_pipeline["detected_fault"] = active_fault_kind
-                    self.ml_pipeline["affected_component"] = FAULT_COMPONENT_MAP.get(active_fault_kind, "cyl1")
-                    self.ml_pipeline["recommendation"] = FAULT_RECOMMENDATIONS.get(active_fault_kind, "Inspect affected subsystem components.")
-
-                    self.cached_layer2_pred = active_fault_kind
-                    self.cached_layer2_conf = round(ml_conf_pct / 100.0, 4)
-                    self.cached_layer3_anom = True
-                    self.cached_layer3_recon = max(0.1420, round(ae_err_val, 5))
-                else:
-                    self.ml_pipeline["stage"] = "ANOMALY_DETECTED"
-                    self.ml_pipeline["stage_index"] = 4
-                    self.ml_pipeline["stage_label"] = "Anomaly Detected (Threshold Crossed)"
-                    self.ml_pipeline["engine_response"] = "Sensor telemetry crossed detection confidence threshold"
-                    self.ml_pipeline["ml_status"] = f"Confidence {ml_conf_pct:.1f}% >= {threshold_pct:.1f}%. Validating multi-class signature..."
-                    self.ml_pipeline["is_detected"] = False
-                    self.ml_pipeline["detected_fault"] = "none"
-                    self.ml_pipeline["affected_component"] = "none"
+        is_detected = bool(diag["physics_rule_active"])
+        detected_fault = str(diag["physics_fault_type"]) if is_detected else "none"
+        detected_msg = str(diag["physics_rule_message"] or "Nominal operation")
 
         self.latest_diagnosis = {
-            "anomaly_detected": bool(diag["physics_rule_active"] or self.ml_pipeline["is_detected"]),
-            "fault_type": str(self.ml_pipeline["detected_fault"] if self.ml_pipeline["is_detected"] else (diag["physics_fault_type"] if diag["physics_rule_active"] else "none")),
-            "message": str(self.ml_pipeline["recommendation"] if self.ml_pipeline["is_detected"] else (diag["physics_rule_message"] or "Nominal operation")),
+            "anomaly_detected": is_detected,
+            "fault_type": detected_fault,
+            "message": detected_msg,
             "health_index": round(float(self.health_index), 5),
-            "layer2_predicted_fault": self.cached_layer2_pred,
-            "layer2_confidence": self.cached_layer2_conf,
-            "layer3_anomaly_detected": self.cached_layer3_anom,
-            "layer3_reconstruction_error": self.cached_layer3_recon,
         }
         return self.latest_diagnosis
 
-    def get_current_snapshot(self) -> Dict[str, Any]:
-        """Generates an instantaneous telemetry snapshot enriched with live engine parameters."""
-        throttle_fn = self.mission.throttle_callback()
-        ambient_fn = self.mission.ambient_callback()
-        dydt, out = self.twin._physics_step(self.t, self.y, throttle_fn, ambient_fn)
-        telemetry = self.sensor_noise.process_snapshot(out, include_diagnostics=True)
-        telemetry["is_running"] = self.is_running
-        telemetry["health_index"] = round(float(self.health_index), 4)
+    def _build_telemetry_payload(self, out: Dict[str, Any], telemetry: Dict[str, Any]) -> Dict[str, Any]:
+        """Enriches raw snapshot with physically correlated parameters, RTM, and fault status."""
+        is_detected = bool(self.latest_diagnosis.get("anomaly_detected", False))
+        detected_fault = self.latest_diagnosis.get("fault_type", "none")
 
-        # Run diagnosis & ML progression state machine
-        if "diagnostics" in telemetry:
-            telemetry["diagnostics"]["ml_diagnostics"] = self._diagnose_snapshot(out, telemetry)
-
-        # Derive Live RTM (Running / Real-Time Monitoring Index)
+        # Derive Live RTM
         rtm_val = compute_live_rtm(out, telemetry, self.health_index, out.get("fault_state", {}))
         telemetry["rtm_percent"] = rtm_val
 
@@ -781,7 +415,7 @@ class EngineSimulationService:
 
         # Derive Fuel Pressure (bar) & Fuel Flow (L/h)
         fuel_press = (map_pa / 1e5) + 0.35 + float(np.random.normal(0, 0.012))
-        if "injector" in self.ml_pipeline.get("injected_fault", "") and self.ml_pipeline.get("is_detected", False):
+        if "injector" in (self.injected_fault or {}).get("kind", "") and is_detected:
             fuel_press -= 0.28
         telemetry["fuel_pressure_bar"] = round(max(0.2, fuel_press), 2)
         telemetry["fuel_flow_l_h"] = round(float(telemetry["fuel_flow_kg_s"] * 3600.0 / 0.72), 1)
@@ -813,15 +447,151 @@ class EngineSimulationService:
         telemetry["delta_cht_max"] = round(float(max(telemetry["cht_c"]) - min(telemetry["cht_c"])), 1)
         telemetry["delta_egt_max"] = round(float(max(telemetry["egt_c"]) - min(telemetry["egt_c"])), 1)
 
-        # ML Pipeline state & active faults (Active faults exposed only after ML detection)
-        telemetry["ml_pipeline"] = copy.deepcopy(self.ml_pipeline)
-        if self.ml_pipeline["is_detected"]:
-            telemetry["active_faults"] = [self.ml_pipeline["detected_fault"]]
+        # Active faults: Contains detected faults ONLY when physical conditions are satisfied
+        if is_detected and detected_fault != "none":
+            telemetry["active_faults"] = [detected_fault]
             telemetry["active_faults_count"] = 1
         else:
             telemetry["active_faults"] = []
             telemetry["active_faults_count"] = 0
 
+        # Injected fault: Clear separation from detection
+        if self.injected_fault:
+            remaining_delay = round(max(0.0, self.injected_fault["start_t"] - self.t), 2)
+            elapsed = round(max(0.0, self.t - self.injected_fault["start_t"]), 2)
+            is_active_progression = bool(remaining_delay <= 0.0)
+            telemetry["injected_fault"] = {
+                "is_injected": True,
+                "is_active_progression": is_active_progression,
+                "remaining_delay_s": remaining_delay,
+                "kind": self.injected_fault["kind"],
+                "cylinder": self.injected_fault["cylinder"],
+                "severity": self.injected_fault["severity"],
+                "ramp_s": self.injected_fault["ramp_s"],
+                "elapsed_s": elapsed,
+                "is_detected": is_detected,
+                "detected_fault": detected_fault,
+                "message": self.latest_diagnosis.get("message", "Developing in engine physics"),
+            }
+        else:
+            telemetry["injected_fault"] = {
+                "is_injected": False,
+                "kind": "none",
+                "cylinder": 0,
+                "severity": 0.0,
+                "ramp_s": 0.0,
+                "elapsed_s": 0.0,
+                "is_detected": False,
+                "detected_fault": "none",
+                "message": "Nominal operation",
+            }
+
+        # Clean status payload for frontend compatibility
+        target_cyl_idx = self.injected_fault["cylinder"] if self.injected_fault else 0
+        affected_comp = FAULT_COMPONENT_MAP.get(detected_fault, f"cyl{target_cyl_idx + 1}") if is_detected else "none"
+        telemetry["ml_pipeline"] = {
+            "is_detected": is_detected,
+            "detected_fault": detected_fault,
+            "affected_component": affected_comp,
+            "stage": "FAULT_DETECTED" if is_detected else ("DEVELOPING" if self.injected_fault else "NORMAL"),
+            "stage_label": f"Physical Fault Detected: {detected_fault.upper()}" if is_detected else (f"Fault Injected ({self.injected_fault['kind'].upper()}) - Developing" if self.injected_fault else "Nominal Operation"),
+            "injected_fault": self.injected_fault["kind"] if self.injected_fault else "none",
+            "target_cylinder": target_cyl_idx,
+            "severity": self.injected_fault["severity"] if self.injected_fault else 0.0,
+            "ramp_s": self.injected_fault["ramp_s"] if self.injected_fault else 3.5,
+            "elapsed_since_injection_s": telemetry["injected_fault"]["elapsed_s"],
+            "engine_response": self.latest_diagnosis.get("message", "Engine operating nominally"),
+            "recommendation": FAULT_RECOMMENDATIONS.get(detected_fault, "Continuous parameter monitoring active.") if is_detected else "Continuous parameter monitoring active.",
+        }
+        return telemetry
+
+    def get_current_snapshot(self) -> Dict[str, Any]:
+        """Generates an instantaneous telemetry snapshot."""
+        if not self.is_running:
+            # Engine is OFF / Cold Standby
+            telemetry = {
+                "t": round(self.t, 2),
+                "is_running": False,
+                "rpm": 0.0,
+                "altitude_m": 0.0,
+                "airspeed_mps": 0.0,
+                "ambient_c": 15.0,
+                "cht_c": [22.0, 22.0, 22.0, 22.0],
+                "egt_c": [22.0, 22.0, 22.0, 22.0],
+                "oil_temp_c": 22.0,
+                "oil_pressure_bar": 0.0,
+                "fuel_flow_kg_s": 0.0,
+                "fuel_flow_l_h": 0.0,
+                "fuel_pressure_bar": 0.0,
+                "map_hpa": 1013.0,
+                "map_inhg": 29.92,
+                "engine_load_pct": 0.0,
+                "afr_actual": 14.70,
+                "lambda_ratio": 1.000,
+                "alternator_v": 0.0,
+                "vibration_rms_g": 0.005,
+                "vibration_orders": {
+                    "amp_1x_g": 0.0,
+                    "amp_cam_g": 0.0,
+                    "amp_fire_g": 0.0,
+                    "f0_hz": 0.0,
+                    "f_cam_hz": 0.0,
+                    "f_fire_hz": 0.0,
+                },
+                "delta_cht_max": 0.0,
+                "delta_egt_max": 0.0,
+                "rtm_percent": 100.0,
+                "health_index": 1.0,
+                "active_faults": [],
+                "active_faults_count": 0,
+                "injected_fault": {
+                    "is_injected": False,
+                    "kind": "none",
+                    "cylinder": 0,
+                    "severity": 0.0,
+                    "ramp_s": 0.0,
+                    "elapsed_s": 0.0,
+                    "is_detected": False,
+                    "detected_fault": "none",
+                    "message": "Engine OFF / Standby",
+                },
+                "diagnostics": {
+                    "ml_diagnostics": {
+                        "anomaly_detected": False,
+                        "fault_type": "none",
+                        "message": "Engine OFF / Standby",
+                        "health_index": 1.0,
+                    }
+                },
+                "ml_pipeline": {
+                    "is_detected": False,
+                    "detected_fault": "none",
+                    "affected_component": "none",
+                    "stage": "NORMAL",
+                    "stage_label": "Engine OFF / Standby",
+                    "injected_fault": "none",
+                    "target_cylinder": 0,
+                    "severity": 0.0,
+                    "ramp_s": 3.5,
+                    "elapsed_since_injection_s": 0.0,
+                    "engine_response": "Engine OFF / Standby",
+                    "recommendation": "Engine paused / cold standby. Press START / RESUME to initiate operation.",
+                }
+            }
+            self.latest_telemetry = telemetry
+            return telemetry
+
+        throttle_fn = self.mission.throttle_callback()
+        ambient_fn = self.mission.ambient_callback()
+        dydt, out = self.twin._physics_step(self.t, self.y, throttle_fn, ambient_fn)
+        telemetry = self.sensor_noise.process_snapshot(out, include_diagnostics=True)
+        telemetry["is_running"] = True
+        telemetry["health_index"] = round(float(self.health_index), 4)
+
+        if "diagnostics" in telemetry:
+            telemetry["diagnostics"]["ml_diagnostics"] = self._diagnose_snapshot(out, telemetry)
+
+        telemetry = self._build_telemetry_payload(out, telemetry)
         self.latest_telemetry = telemetry
         return telemetry
 
@@ -844,76 +614,17 @@ class EngineSimulationService:
 
                     # Process read-out stage sensor realism layer
                     telemetry = self.sensor_noise.process_snapshot(out, include_diagnostics=True)
-                    telemetry["is_running"] = self.is_running
+                    telemetry["is_running"] = True
                     telemetry["health_index"] = round(float(self.health_index), 4)
 
                     if "diagnostics" in telemetry:
                         telemetry["diagnostics"]["ml_diagnostics"] = self._diagnose_snapshot(out, telemetry)
 
-                    # Derive Live RTM
-                    rtm_val = compute_live_rtm(out, telemetry, self.health_index, out.get("fault_state", {}))
-                    telemetry["rtm_percent"] = rtm_val
-
-                    # Derive Engine Load (%)
-                    map_pa = float(out.get("map_pa", 101325.0))
-                    rpm = float(telemetry["rpm"])
-                    load_pct = min(100.0, max(12.0, (map_pa / 101325.0) * (rpm / 5800.0) * 100.0))
-                    telemetry["engine_load_pct"] = round(load_pct, 1)
-
-                    # Derive Fuel Pressure (bar) & Fuel Flow (L/h)
-                    fuel_press = (map_pa / 1e5) + 0.35 + float(np.random.normal(0, 0.012))
-                    if "injector" in self.ml_pipeline.get("injected_fault", "") and self.ml_pipeline.get("is_detected", False):
-                        fuel_press -= 0.28
-                    telemetry["fuel_pressure_bar"] = round(max(0.2, fuel_press), 2)
-                    telemetry["fuel_flow_l_h"] = round(float(telemetry["fuel_flow_kg_s"] * 3600.0 / 0.72), 1)
-
-                    # Derive Air-Fuel Ratio (AFR) & Lambda
-                    m_dot_a = float(out.get("m_dot_a_kg_s", telemetry["fuel_flow_kg_s"] * 14.7))
-                    m_dot_f = float(telemetry["fuel_flow_kg_s"])
-                    afr_val = (m_dot_a / max(m_dot_f, 1e-7)) if m_dot_f > 0 else 14.7
-                    telemetry["afr_actual"] = round(float(np.clip(afr_val, 9.5, 21.0)), 2)
-                    telemetry["lambda_ratio"] = round(telemetry["afr_actual"] / 14.7, 3)
-
-                    # Manifold Pressure in hPa and inHg
-                    map_hpa = round(map_pa / 100.0, 1)
-                    telemetry["map_hpa"] = map_hpa
-                    telemetry["map_inhg"] = round(map_hpa * 0.02953, 2)
-
-                    # Vibration Orders
-                    vib = out.get("vibration", {})
-                    telemetry["vibration_orders"] = {
-                        "amp_1x_g": round(float(vib.get("amp_1x_g", 0.05)), 3),
-                        "amp_cam_g": round(float(vib.get("amp_cam_g", 0.03)), 3),
-                        "amp_fire_g": round(float(vib.get("amp_fire_g", 0.08)), 3),
-                        "f0_hz": round(float(vib.get("f0_hz", rpm / 60.0)), 1),
-                        "f_cam_hz": round(float(vib.get("f_cam_hz", rpm / 120.0)), 1),
-                        "f_fire_hz": round(float(vib.get("f_fire_hz", 2.0 * rpm / 60.0)), 1),
-                    }
-
-                    # Cylinder deltas
-                    telemetry["delta_cht_max"] = round(float(max(telemetry["cht_c"]) - min(telemetry["cht_c"])), 1)
-                    telemetry["delta_egt_max"] = round(float(max(telemetry["egt_c"]) - min(telemetry["egt_c"])), 1)
-
-                    # ML Pipeline state & active faults
-                    telemetry["ml_pipeline"] = copy.deepcopy(self.ml_pipeline)
-                    if self.ml_pipeline["is_detected"]:
-                        telemetry["active_faults"] = [self.ml_pipeline["detected_fault"]]
-                        telemetry["active_faults_count"] = 1
-                    else:
-                        telemetry["active_faults"] = []
-                        telemetry["active_faults_count"] = 0
-
+                    telemetry = self._build_telemetry_payload(out, telemetry)
                     self.latest_telemetry = telemetry
                 else:
-                    if self.latest_telemetry:
-                        self.latest_telemetry["is_running"] = False
-                        self.latest_telemetry["ml_pipeline"] = copy.deepcopy(self.ml_pipeline)
-                        if self.ml_pipeline["is_detected"]:
-                            self.latest_telemetry["active_faults"] = [self.ml_pipeline["detected_fault"]]
-                            self.latest_telemetry["active_faults_count"] = 1
-                        else:
-                            self.latest_telemetry["active_faults"] = []
-                            self.latest_telemetry["active_faults_count"] = 0
+                    if not self.latest_telemetry or self.latest_telemetry.get("is_running", False):
+                        self.latest_telemetry = self.get_current_snapshot()
 
                 # Broadcast on interval
                 now = time.perf_counter()
@@ -1060,7 +771,6 @@ async def websocket_engine_endpoint(websocket: WebSocket):
                     )
                     sim_service.inject_fault(fault_cmd)
                     if sim_service.latest_telemetry:
-                        sim_service.latest_telemetry["ml_pipeline"] = sim_service.ml_pipeline
                         await ws_manager.broadcast_json(sim_service.latest_telemetry)
                 elif cmd == "clear_faults":
                     sim_service.clear_faults()
@@ -1072,8 +782,7 @@ async def websocket_engine_endpoint(websocket: WebSocket):
                     logger.info(f"Updated simulation speed to {spd}x")
                 elif cmd == "set_detection_threshold":
                     thresh = max(0.50, min(0.99, float(msg.get("threshold", 0.80))))
-                    sim_service.ml_pipeline["detection_threshold"] = thresh
-                    logger.info(f"Updated ML detection threshold to {thresh:.2f}")
+                    logger.info(f"Received detection threshold command: {thresh:.2f}")
             except Exception as ex:
                 logger.warning(f"Error handling WebSocket client command: {ex}")
     except WebSocketDisconnect:
@@ -1091,6 +800,7 @@ def get_status():
     flight = sim_service.mission.get_flight_condition(sim_service.t)
     return {
         "status": "running" if sim_service.is_running else "paused",
+        "is_running": sim_service.is_running,
         "sim_time_s": round(sim_service.t, 2),
         "sim_speed": sim_service.sim_speed,
         "active_connections": len(ws_manager.active_connections),
@@ -1100,9 +810,9 @@ def get_status():
             "airspeed_mps": round(flight[1], 1),
             "throttle": round(flight[3], 3),
         },
-        "active_faults": sim_service.fault_records,
+        "active_faults": sim_service.latest_telemetry.get("active_faults", []),
+        "injected_fault": sim_service.injected_fault,
         "sensor_noise_enabled": sim_service.sensor_noise.enabled,
-        "ml_pipeline": sim_service.ml_pipeline,
         "ml_diagnostics": sim_service.latest_diagnosis,
         "latest_telemetry": sim_service.latest_telemetry
     }
@@ -1164,7 +874,12 @@ def clear_faults_endpoint():
 
 @app.get("/api/faults")
 def list_faults_endpoint():
-    return {"active_faults": sim_service.fault_records, "ml_pipeline": sim_service.ml_pipeline}
+    return {
+        "active_faults": sim_service.latest_telemetry.get("active_faults", []),
+        "injected_fault": sim_service.injected_fault,
+        "fault_history": sim_service.fault_records,
+        "diagnostics": sim_service.latest_diagnosis,
+    }
 
 @app.get("/api/mission/replay")
 def get_mission_replay():

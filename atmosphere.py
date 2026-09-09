@@ -97,27 +97,27 @@ class FlightMissionProfile:
                 self.manual_throttle
             )
 
-        # Predefined ~12-minute demo mission (720s)
-        # 0 - 30s: Idle warmup on runway
-        # 30 - 120s: Takeoff run & initial climb (throttle ramps 0.15 -> 1.0)
-        # 120 - 150s: Full power climb to 3000m
-        # 150 - 480s: Cruise / surveillance loiter (throttle 0.65, alt 3000m, speed 35 m/s)
+        # Accelerated interactive demo mission
+        # 0 - 4s: Idle warmup on runway (alt = 0m)
+        # 4 - 20s: Takeoff roll & initial climb (alt climbs 0 -> 1500m)
+        # 20 - 40s: Climb to cruise altitude (alt climbs 1500 -> 3000m)
+        # 40 - 480s: High-altitude cruise / surveillance loiter (alt = 3000m, speed = 35 m/s)
         # 480 - 600s: Controlled descent
-        # 600s+: Idle / approach
-        if t < 30.0:
+        # 600s+: Approach
+        if t < 4.0:
             alt = 0.0
             speed = 5.0
-            throttle = 0.15
-        elif t < 120.0:
-            progress = (t - 30.0) / 90.0
+            throttle = 0.20
+        elif t < 20.0:
+            progress = (t - 4.0) / 16.0
             alt = 1500.0 * progress
             speed = 10.0 + 25.0 * progress
-            throttle = 0.15 + 0.85 * progress
-        elif t < 150.0:
-            progress = (t - 120.0) / 30.0
+            throttle = 0.25 + 0.75 * progress
+        elif t < 40.0:
+            progress = (t - 20.0) / 20.0
             alt = 1500.0 + 1500.0 * progress
             speed = 35.0
-            throttle = 1.0
+            throttle = 0.95
         elif t < 480.0:
             alt = 3000.0
             speed = 35.0
@@ -130,7 +130,7 @@ class FlightMissionProfile:
         else:
             alt = 0.0
             speed = 15.0
-            throttle = 0.15
+            throttle = 0.20
 
         return (alt, speed, None, throttle)
 

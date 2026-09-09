@@ -241,7 +241,7 @@ def compute_vibration_features(rpm: float, fault_state: dict) -> dict:
     f_gear = 43.0 * f0  # Z_TEETH = 43 reduction gearbox mesh frequency
     amp_1x = 0.05 + fault_state["unbalance_extra"]
     amp_cam = 0.03 + 0.9 * (fault_state["extra_vibration"] + 0.5 * fault_state["rpm_instability"])
-    amp_fire = 0.08
+    amp_fire = 0.08 + 2.8 * fault_state.get("extra_vibration", 0.0)
     rms = float(np.sqrt(amp_1x ** 2 + amp_cam ** 2 + amp_fire ** 2))
     return dict(f0_hz=f0, f_cam_hz=f_cam, f_fire_hz=f_fire, f_gear_hz=f_gear,
                 amp_1x_g=amp_1x, amp_cam_g=amp_cam, amp_fire_g=amp_fire, rms_g=rms)
@@ -313,14 +313,15 @@ class FaultInjector:
                 state["rpm_instability"] += 0.5 * s
 
             elif ev.kind in ["injector_abnormal", "injector_abnormalities"]:
-                bias = 4.0 * s
+                bias = 5.2 * s
                 state["afr_bias"][0] += bias
                 state["afr_bias"][2] += bias
-                state["afr_bias"][1] -= bias * 0.3
-                state["afr_bias"][3] -= bias * 0.3
+                state["afr_bias"][1] -= bias * 0.35
+                state["afr_bias"][3] -= bias * 0.35
 
             elif ev.kind == "cooling_degradation":
-                state["cooling_factor"] *= (1.0 - 0.65 * s)
+                state["cooling_factor"] *= (1.0 - 0.75 * s)
+                state["oil_cooling_factor"] *= (1.0 - 0.55 * s)
 
             elif ev.kind in ["lubrication_issue", "lubrication_issues"]:
                 state["oil_leak_factor"] *= (1.0 - 0.56 * s)
@@ -330,16 +331,16 @@ class FaultInjector:
                 sensor = ev.extra.get("sensor", f"CHT_{idx + 1}")
                 rate = ev.extra.get("drift_per_s", 1.0)
                 state["sensor_drift"][sensor] = (
-                    state["sensor_drift"].get(sensor, 0.0) + (35.0 + rate * (t - ev.start_t)) * s
+                    state["sensor_drift"].get(sensor, 0.0) + (65.0 + rate * (t - ev.start_t)) * s
                 )
 
             elif ev.kind == "combustion_instability":
-                state["rpm_instability"] += 0.8 * s
-                state["extra_vibration"] += 0.5 * s
+                state["rpm_instability"] += 1.8 * s
+                state["extra_vibration"] += 0.65 * s
 
             elif ev.kind in ["overheating_trend", "overheating_trends"]:
-                state["cooling_factor"] *= (1.0 - 0.45 * s)
-                state["oil_cooling_factor"] *= (1.0 - 0.4 * s)
+                state["cooling_factor"] *= (1.0 - 0.50 * s)
+                state["oil_cooling_factor"] *= (1.0 - 0.45 * s)
 
             elif ev.kind == "abnormal_vibration":
                 state["unbalance_extra"] += 2.2 * s
