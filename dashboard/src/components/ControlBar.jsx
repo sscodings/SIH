@@ -113,7 +113,7 @@ export function ControlBar({ telemetry, isConnected, sendCommand }) {
         <button
           type="button"
           onClick={handleClearFaults}
-          disabled={!isConnected || activeFaultsCount === 0}
+          disabled={!isConnected}
           className="btn-clear"
         >
           Clear

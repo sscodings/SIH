@@ -134,42 +134,48 @@ export function EngineModel({ telemetry }) {
     const mlDiag = telemetry.diagnostics?.ml_diagnostics || {};
     const classifierFault = mlDiag.layer2_predicted_fault || 'none';
     const physicsFault = mlDiag.fault_type || 'none';
-    const hasAnomaly = Boolean(
-      (classifierFault !== 'none') ||
-      mlDiag.anomaly_detected ||
-      mlDiag.layer3_anomaly_detected ||
-      (telemetry.active_faults_count > 0)
-    );
 
-    // Determine active fault
-    let activeFault = 'none';
-    if (classifierFault !== 'none') {
-      activeFault = classifierFault;
-    } else if (physicsFault !== 'none') {
-      activeFault = physicsFault;
+    // Collect ALL active faults (supports single or multiple simultaneous injected faults)
+    const activeFaultsSet = new Set();
+    if (Array.isArray(telemetry.active_faults)) {
+      telemetry.active_faults.forEach((f) => {
+        if (f && f !== 'none') activeFaultsSet.add(f);
+      });
+    }
+    if (classifierFault && classifierFault !== 'none') {
+      activeFaultsSet.add(classifierFault);
+    }
+    if (physicsFault && physicsFault !== 'none') {
+      activeFaultsSet.add(physicsFault);
     }
 
-    // Determine which meshes should be highlighted red
+    // Determine which meshes should be highlighted red across ALL active faults
     const highlightedNames = new Set();
-    if (hasAnomaly) {
-      if (FAULT_SUBSYSTEM_MAP[activeFault]) {
-        FAULT_SUBSYSTEM_MAP[activeFault].forEach((name) => highlightedNames.add(name));
-      } else {
-        // Fallback for generic anomaly: highlight the cylinder with highest delta CHT
-        let highestDeltaIdx = 0;
-        const deltaList = telemetry.diagnostics?.delta_cht_ambient || chtList;
-        if (deltaList && deltaList.length > 0) {
-          let maxDelta = -Infinity;
-          deltaList.forEach((val, idx) => {
-            if (Number(val) > maxDelta) {
-              maxDelta = Number(val);
-              highestDeltaIdx = idx;
-            }
-          });
-        }
-        const cylNames = ['Cylindr 1', 'Cylindr 2', 'Cylindr 1.001', 'Cylindr 2.001'];
-        highlightedNames.add(cylNames[highestDeltaIdx]);
+    activeFaultsSet.forEach((fault) => {
+      const parts = FAULT_SUBSYSTEM_MAP[fault];
+      if (parts) {
+        parts.forEach((p) => highlightedNames.add(p));
       }
+    });
+
+    // Fallback: if an anomaly is flagged without a specific fault mapping, highlight the highest delta CHT cylinder
+    const hasUnmappedAnomaly = (highlightedNames.size === 0) && Boolean(
+      mlDiag.layer3_anomaly_detected || mlDiag.anomaly_detected || (telemetry.active_faults_count > 0)
+    );
+    if (hasUnmappedAnomaly) {
+      let highestDeltaIdx = 0;
+      const deltaList = telemetry.diagnostics?.delta_cht_ambient || chtList;
+      if (deltaList && deltaList.length > 0) {
+        let maxDelta = -Infinity;
+        deltaList.forEach((val, idx) => {
+          if (Number(val) > maxDelta) {
+            maxDelta = Number(val);
+            highestDeltaIdx = idx;
+          }
+        });
+      }
+      const cylNames = ['Cylindr 1', 'Cylindr 2', 'Cylindr 1.001', 'Cylindr 2.001'];
+      highlightedNames.add(cylNames[highestDeltaIdx]);
     }
 
     const pulse = 0.5 + 0.5 * Math.sin(state.clock.elapsedTime * 8.0);

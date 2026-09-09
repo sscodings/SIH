@@ -218,7 +218,14 @@ class EngineSimulationService:
             "layer3_anomaly_detected": False,
             "layer3_reconstruction_error": 0.0,
         }
-        logger.info("Engine simulation reset to cold/idle state.")
+        self.is_running = False  # Explicitly pause simulation on reset
+        snap = self.get_current_snapshot()
+        snap["is_running"] = False
+        snap["active_faults"] = []
+        snap["active_faults_count"] = 0
+        snap["health_index"] = 1.0
+        self.latest_telemetry = snap
+        logger.info("Engine simulation reset to cold/idle state (paused).")
 
     def inject_fault(self, cmd: FaultInjectionCommand) -> Dict[str, Any]:
         kind_map = {
@@ -269,6 +276,21 @@ class EngineSimulationService:
         self.cached_layer2_conf = 1.0
         self.cached_layer3_anom = False
         self.cached_layer3_recon = 0.0
+        self.latest_diagnosis = {
+            "anomaly_detected": False,
+            "fault_type": "none",
+            "message": "Nominal operation",
+            "health_index": round(float(self.health_index), 4),
+            "layer2_predicted_fault": "none",
+            "layer2_confidence": 1.0,
+            "layer3_anomaly_detected": False,
+            "layer3_reconstruction_error": 0.0,
+        }
+        if self.latest_telemetry:
+            self.latest_telemetry["active_faults"] = []
+            self.latest_telemetry["active_faults_count"] = 0
+            if "diagnostics" in self.latest_telemetry:
+                self.latest_telemetry["diagnostics"]["ml_diagnostics"] = self.latest_diagnosis
         logger.info("Cleared all injected faults.")
 
     def _diagnose_snapshot(self, out: Dict[str, Any], telemetry: Dict[str, Any]) -> Dict[str, Any]:
@@ -276,13 +298,29 @@ class EngineSimulationService:
         mu = vogel_viscosity(telemetry["oil_temp_c"])
         p_oil_pa = telemetry["oil_pressure_bar"] * 1e5
         p_oil_nominal_pa = 4.1e5
-        t_nom_c = 95.0
-        k_wear = 2e-13
 
-        self.health_index = health_index_step(
-            self.health_index, p_oil_pa, p_oil_nominal_pa,
-            telemetry["oil_temp_c"], t_nom_c, self.step_dt, k_wear
-        )
+        # Continuous real-time wear & tear calculation
+        # 1. Baseline mechanical aging at nominal cruise: ~0.00008 per second
+        baseline_wear = 0.00008 * self.step_dt * (telemetry["rpm"] / 4500.0) * (telemetry["oil_temp_c"] / 85.0)
+
+        # 2. Damage acceleration under mechanical stress / active faults
+        fault_damage_multiplier = 1.0
+        if p_oil_pa < p_oil_nominal_pa:
+            pressure_deficit = (p_oil_nominal_pa - p_oil_pa) / p_oil_nominal_pa
+            fault_damage_multiplier += 110.0 * pressure_deficit
+
+        if telemetry["oil_temp_c"] > 95.0:
+            fault_damage_multiplier += 35.0 * ((telemetry["oil_temp_c"] - 95.0) / 20.0)
+
+        vib_rms = telemetry.get("vibration_rms_g", 0.8)
+        if vib_rms > 1.2:
+            fault_damage_multiplier += 40.0 * (vib_rms - 1.2)
+
+        if len(self.fault_records) > 0:
+            fault_damage_multiplier += 18.0 * len(self.fault_records)
+
+        wear_increment = baseline_wear * fault_damage_multiplier
+        self.health_index = max(0.0, self.health_index - wear_increment)
 
         delta_egt_current = max(telemetry["egt_c"]) - min(telemetry["egt_c"])
         max_cht_current = max(telemetry["cht_c"])
@@ -437,6 +475,8 @@ class EngineSimulationService:
         telemetry = self.sensor_noise.process_snapshot(out, include_diagnostics=True)
         telemetry["is_running"] = self.is_running
         telemetry["active_faults_count"] = len(self.fault_records)
+        telemetry["active_faults"] = [f["kind"] for f in self.fault_records]
+        telemetry["health_index"] = round(float(self.health_index), 4)
         if "diagnostics" in telemetry:
             telemetry["diagnostics"]["ml_diagnostics"] = self._diagnose_snapshot(out, telemetry)
         self.latest_telemetry = telemetry
@@ -462,12 +502,17 @@ class EngineSimulationService:
                     telemetry = self.sensor_noise.process_snapshot(out, include_diagnostics=True)
                     telemetry["is_running"] = self.is_running
                     telemetry["active_faults_count"] = len(self.fault_records)
+                    telemetry["active_faults"] = [f["kind"] for f in self.fault_records]
+                    telemetry["health_index"] = round(float(self.health_index), 4)
                     if "diagnostics" in telemetry:
                         telemetry["diagnostics"]["ml_diagnostics"] = self._diagnose_snapshot(out, telemetry)
                     self.latest_telemetry = telemetry
                 else:
                     if self.latest_telemetry:
                         self.latest_telemetry["is_running"] = False
+                        self.latest_telemetry["active_faults_count"] = len(self.fault_records)
+                        self.latest_telemetry["active_faults"] = [f["kind"] for f in self.fault_records]
+                        self.latest_telemetry["health_index"] = round(float(self.health_index), 4)
 
                 # Broadcast on interval (ensures UI receives paused heartbeats and live updates)
                 now = time.perf_counter()
