@@ -24,16 +24,34 @@ function computeChtColor(temp) {
   }
 }
 
+// Map fault taxonomy to CAD component node names
+const FAULT_SUBSYSTEM_MAP = {
+  lubrication_issues: ['Korpus maslo', 'Filtr', 'Bachek'],
+  lubrication_issue: ['Korpus maslo', 'Filtr', 'Bachek'],
+  misfire: ['Cylindr 1'],
+  sensor_drift: ['Cylindr 1', 'Datchik'],
+  injector_abnormalities: ['Vhodnoy kollektor', 'Patrubok vhodnoy', 'Cylindr 1', 'Cylindr 1.001'],
+  injector_abnormal: ['Vhodnoy kollektor', 'Patrubok vhodnoy', 'Cylindr 1', 'Cylindr 1.001'],
+  cooling_degradation: [
+    'Patrubok voda 1', 'Patrubok voda 2', 'Patrubok voda 3', 'Patrubok voda 4',
+    'Patrubok voda niz 1.m3d', 'Patrubok voda niz 2', 'Patrubok voda niz 3', 'Patrubok voda niz 4',
+  ],
+  abnormal_vibration: ['Korpus reduktora', 'Flanec 1', 'Flanec 2', 'Flanec vala 1', 'Levyi karter 1', 'Pravyi karter 1'],
+  combustion_instability: ['Cylindr 1', 'Cylindr 2', 'Cylindr 1.001', 'Cylindr 2.001'],
+  overheating_trends: ['Cylindr 1', 'Cylindr 2', 'Cylindr 1.001', 'Cylindr 2.001', 'Korpus maslo'],
+  overheating_trend: ['Cylindr 1', 'Cylindr 2', 'Cylindr 1.001', 'Cylindr 2.001', 'Korpus maslo'],
+};
+
 export function EngineModel({ telemetry }) {
   // Load model from public folder
   const { scene, nodes } = useGLTF('/rotax914.glb');
   const loggedNodesRef = useRef(false);
 
-  // 1. Log node names once on load to verify part names in the browser console
+  // 1. Log node names once on load
   useEffect(() => {
     if (!loggedNodesRef.current && nodes) {
       const keys = Object.keys(nodes);
-      console.log('[EngineModel] Loaded GLTF nodes object keys (' + keys.length + ' parts):', keys);
+      console.log('[EngineModel] Loaded GLTF nodes (' + keys.length + ' parts)');
       loggedNodesRef.current = true;
     }
   }, [nodes]);
@@ -41,8 +59,6 @@ export function EngineModel({ telemetry }) {
   // 2. Identify the 4 cylinder meshes
   const cylinderMeshes = useMemo(() => {
     if (!nodes) return [null, null, null, null];
-
-    const cylList = [null, null, null, null];
     const candidateAliases = [
       ['Cylindr 1', 'cylinder_1', 'Cylindr_1', 'cyl1'],
       ['Cylindr 2', 'cylinder_2', 'Cylindr_2', 'cyl2'],
@@ -50,51 +66,57 @@ export function EngineModel({ telemetry }) {
       ['Cylindr 2.001', 'cylinder_4', 'Cylindr_2_001', 'Cylindr 4', 'cyl4'],
     ];
 
-    candidateAliases.forEach((aliases, i) => {
+    const cylList = candidateAliases.map((aliases) => {
       for (const name of aliases) {
-        if (nodes[name]) {
-          cylList[i] = nodes[name];
-          break;
-        }
+        if (nodes[name]) return nodes[name];
       }
-    });
-
-    // Fallback search across all node names containing 'cyl'
-    if (cylList.some((c) => !c)) {
-      const allCyls = Object.keys(nodes).filter((k) => k.toLowerCase().includes('cyl'));
-      allCyls.forEach((k, idx) => {
-        if (idx < 4 && !cylList[idx]) {
-          cylList[idx] = nodes[k];
-        }
-      });
-    }
-
-    // Clone materials so coloring one cylinder does not color all cylinders
-    cylList.forEach((mesh) => {
-      if (mesh && mesh.material) {
-        if (Array.isArray(mesh.material)) {
-          mesh.material = mesh.material.map((m) => m.clone());
-        } else {
-          mesh.material = mesh.material.clone();
-        }
-      }
+      return null;
     });
 
     return cylList;
   }, [nodes]);
 
-  // 3. PBR material enhancements & shadow configuration
+  // 3. Clone materials for all candidate subsystem meshes so styling does not leak
+  const trackedMeshes = useMemo(() => {
+    if (!nodes) return {};
+    const map = {};
+
+    // Collect all candidate node names from map plus cylinders
+    const allNames = new Set([
+      'Cylindr 1', 'Cylindr 2', 'Cylindr 1.001', 'Cylindr 2.001',
+      'Korpus maslo', 'Filtr', 'Bachek', 'Datchik',
+      'Vhodnoy kollektor', 'Patrubok vhodnoy',
+      'Patrubok voda 1', 'Patrubok voda 2', 'Patrubok voda 3', 'Patrubok voda 4',
+      'Patrubok voda niz 1.m3d', 'Patrubok voda niz 2', 'Patrubok voda niz 3', 'Patrubok voda niz 4',
+      'Korpus reduktora', 'Flanec 1', 'Flanec 2', 'Flanec vala 1', 'Levyi karter 1', 'Pravyi karter 1',
+      'Turbina 1', 'Summator vyhlopa', 'Truba vyhlopnaya',
+    ]);
+
+    allNames.forEach((name) => {
+      const mesh = nodes[name];
+      if (mesh && mesh.isMesh) {
+        if (Array.isArray(mesh.material)) {
+          mesh.material = mesh.material.map((m) => m.clone());
+        } else if (mesh.material) {
+          mesh.material = mesh.material.clone();
+        }
+        map[name] = mesh;
+      }
+    });
+
+    return map;
+  }, [nodes]);
+
+  // 4. Initial PBR styling
   useEffect(() => {
     if (!scene) return;
     scene.traverse((child) => {
       if (child.isMesh) {
         child.castShadow = true;
         child.receiveShadow = true;
-
         const mats = Array.isArray(child.material) ? child.material : [child.material];
         mats.forEach((mat) => {
           if (mat) {
-            // Give CAD parts an authentic aero cast-aluminum finish
             mat.metalness = 0.65;
             mat.roughness = 0.35;
             mat.needsUpdate = true;
@@ -104,46 +126,95 @@ export function EngineModel({ telemetry }) {
     });
   }, [scene]);
 
-  // 4. Per-frame dynamic cylinder coloring
+  // 5. Per-frame dynamic highlighting of faulted parts + CHT heat coloring
   useFrame((state) => {
     if (!telemetry) return;
 
     const chtList = telemetry.cht_c || [150, 150, 150, 150];
     const mlDiag = telemetry.diagnostics?.ml_diagnostics || {};
-    const isAnomaly = Boolean(mlDiag.anomaly_detected || mlDiag.layer3_anomaly_detected);
+    const classifierFault = mlDiag.layer2_predicted_fault || 'none';
+    const physicsFault = mlDiag.fault_type || 'none';
 
-    // Find cylinder with maximum delta CHT to ambient
-    let highestDeltaIdx = 0;
-    const deltaList = telemetry.diagnostics?.delta_cht_ambient || chtList;
-    if (deltaList && deltaList.length > 0) {
-      let maxDelta = -Infinity;
-      deltaList.forEach((val, idx) => {
-        if (Number(val) > maxDelta) {
-          maxDelta = Number(val);
-          highestDeltaIdx = idx;
-        }
+    // Collect ALL active faults (supports single or multiple simultaneous injected faults)
+    const activeFaultsSet = new Set();
+    if (Array.isArray(telemetry.active_faults)) {
+      telemetry.active_faults.forEach((f) => {
+        if (f && f !== 'none') activeFaultsSet.add(f);
       });
     }
+    if (classifierFault && classifierFault !== 'none') {
+      activeFaultsSet.add(classifierFault);
+    }
+    if (physicsFault && physicsFault !== 'none') {
+      activeFaultsSet.add(physicsFault);
+    }
 
-    // Color each cylinder
-    cylinderMeshes.forEach((mesh, idx) => {
-      if (!mesh || !mesh.material) return;
-
-      let targetColor;
-      if (isAnomaly && idx === highestDeltaIdx) {
-        // Force bright pulsing red regardless of raw temp
-        const pulse = 0.85 + 0.15 * Math.sin(state.clock.elapsedTime * 6.0);
-        targetColor = new THREE.Color(pulse, 0.05, 0.05);
-      } else {
-        targetColor = computeChtColor(chtList[idx] || 150);
+    // Determine which meshes should be highlighted red across ALL active faults
+    const highlightedNames = new Set();
+    activeFaultsSet.forEach((fault) => {
+      const parts = FAULT_SUBSYSTEM_MAP[fault];
+      if (parts) {
+        parts.forEach((p) => highlightedNames.add(p));
       }
+    });
 
+    // Fallback: if an anomaly is flagged without a specific fault mapping, highlight the highest delta CHT cylinder
+    const hasUnmappedAnomaly = (highlightedNames.size === 0) && Boolean(
+      mlDiag.layer3_anomaly_detected || mlDiag.anomaly_detected || (telemetry.active_faults_count > 0)
+    );
+    if (hasUnmappedAnomaly) {
+      let highestDeltaIdx = 0;
+      const deltaList = telemetry.diagnostics?.delta_cht_ambient || chtList;
+      if (deltaList && deltaList.length > 0) {
+        let maxDelta = -Infinity;
+        deltaList.forEach((val, idx) => {
+          if (Number(val) > maxDelta) {
+            maxDelta = Number(val);
+            highestDeltaIdx = idx;
+          }
+        });
+      }
+      const cylNames = ['Cylindr 1', 'Cylindr 2', 'Cylindr 1.001', 'Cylindr 2.001'];
+      highlightedNames.add(cylNames[highestDeltaIdx]);
+    }
+
+    const pulse = 0.5 + 0.5 * Math.sin(state.clock.elapsedTime * 8.0);
+    const highlightColor = new THREE.Color(0.98, 0.10, 0.15); // Neon warning red
+    const highlightEmissive = new THREE.Color(0.85 * pulse, 0.02, 0.05);
+
+    // Update all tracked subsystem meshes
+    Object.entries(trackedMeshes).forEach(([name, mesh]) => {
+      if (!mesh || !mesh.material) return;
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      mats.forEach((mat) => {
-        if (mat && mat.color) {
-          mat.color.copy(targetColor);
+
+      if (highlightedNames.has(name)) {
+        // Highlighting active fault component
+        mats.forEach((mat) => {
+          mat.color.copy(highlightColor);
+          if (mat.emissive) {
+            mat.emissive.copy(highlightEmissive);
+            mat.emissiveIntensity = 0.7 + 0.5 * pulse;
+          }
+        });
+      } else {
+        // Reset emissive
+        mats.forEach((mat) => {
+          if (mat.emissive) {
+            mat.emissive.setRGB(0, 0, 0);
+            mat.emissiveIntensity = 0;
+          }
+        });
+
+        // If it's a cylinder, apply natural CHT thermal heat color
+        const cylIdx = ['Cylindr 1', 'Cylindr 2', 'Cylindr 1.001', 'Cylindr 2.001'].indexOf(name);
+        if (cylIdx >= 0) {
+          const chtColor = computeChtColor(chtList[cylIdx] || 150);
+          mats.forEach((mat) => mat.color.copy(chtColor));
+        } else {
+          // Other parts: restore baseline metallic grey
+          mats.forEach((mat) => mat.color.setRGB(0.72, 0.76, 0.82));
         }
-      });
+      }
     });
   });
 

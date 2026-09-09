@@ -23,7 +23,7 @@ export function ControlBar({ telemetry, isConnected, sendCommand }) {
       kind: selectedFault,
       severity: 0.85,
       cylinder: 0,
-      ramp_s: 5.0,
+      ramp_s: 1.5,
       start_in_s: 0.0,
     });
   };
@@ -91,13 +91,14 @@ export function ControlBar({ telemetry, isConnected, sendCommand }) {
           onChange={(e) => setSelectedFault(e.target.value)}
           className="fault-select"
         >
-          <option value="misfire">Misfire (Cyl 1)</option>
-          <option value="lubrication_issue">Lubrication Deficit</option>
-          <option value="cooling_degradation">Cooling Heat Loss</option>
-          <option value="injector_abnormal">Injector Mismatch</option>
-          <option value="sensor_drift">Sensor Drift (CHT)</option>
-          <option value="combustion_instability">Combustion Instability</option>
-          <option value="abnormal_vibration">1x Unbalance Vib</option>
+          <option value="misfire">1. Misfire (Cylinder 1)</option>
+          <option value="injector_abnormalities">2. Injector Mismatch (Bank 1)</option>
+          <option value="cooling_degradation">3. Cooling Heat Loss</option>
+          <option value="lubrication_issues">4. Lubrication Deficit (Oil Leak)</option>
+          <option value="sensor_drift">5. Sensor Drift (CHT Cyl 1)</option>
+          <option value="combustion_instability">6. Combustion Instability</option>
+          <option value="overheating_trends">7. Overheating Trend</option>
+          <option value="abnormal_vibration">8. 1x Shaft Unbalance Vibration</option>
         </select>
 
         <button
@@ -112,7 +113,7 @@ export function ControlBar({ telemetry, isConnected, sendCommand }) {
         <button
           type="button"
           onClick={handleClearFaults}
-          disabled={!isConnected || activeFaultsCount === 0}
+          disabled={!isConnected}
           className="btn-clear"
         >
           Clear
