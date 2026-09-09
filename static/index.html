@@ -1,0 +1,936 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rotax 914 MALE UAV Digital Twin — Live Telemetry & Control</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #080c14;
+      --bg-card: rgba(16, 24, 40, 0.75);
+      --bg-card-border: rgba(45, 65, 95, 0.45);
+      --accent-cyan: #00f2fe;
+      --accent-blue: #4facfe;
+      --accent-green: #10b981;
+      --accent-amber: #f59e0b;
+      --accent-rose: #ef4444;
+      --accent-purple: #8b5cf6;
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+      --text-dim: #64748b;
+      --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background: radial-gradient(circle at 20% 20%, #0d1527 0%, var(--bg-dark) 100%);
+      color: var(--text-main);
+      font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+      min-height: 100vh;
+      overflow-x: hidden;
+      padding-bottom: 2rem;
+    }
+
+    /* Top Navigation Header */
+    header {
+      background: rgba(10, 16, 28, 0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--bg-card-border);
+      padding: 1rem 2rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .brand-section {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .logo-badge {
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
+      color: #050a14;
+      font-weight: 800;
+      font-size: 1.1rem;
+      padding: 0.4rem 0.8rem;
+      border-radius: 8px;
+      letter-spacing: 1px;
+    }
+
+    .brand-title h1 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      background: linear-gradient(to right, #fff, #94a3b8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .brand-title p {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      letter-spacing: 0.5px;
+    }
+
+    .status-badge-container {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .ws-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.4rem 0.9rem;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      color: var(--accent-green);
+      transition: all 0.3s ease;
+    }
+
+    .ws-badge.disconnected {
+      background: rgba(239, 68, 68, 0.15);
+      border-color: rgba(239, 68, 68, 0.3);
+      color: var(--accent-rose);
+    }
+
+    .pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background-color: currentColor;
+      box-shadow: 0 0 8px currentColor;
+      animation: pulse 1.8s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.8); }
+    }
+
+    /* Main Container */
+    .dashboard-grid {
+      max-width: 1440px;
+      margin: 1.5rem auto;
+      padding: 0 1.5rem;
+      display: grid;
+      grid-template-columns: 340px 1fr;
+      gap: 1.5rem;
+    }
+
+    @media (max-width: 1024px) {
+      .dashboard-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    /* Glass Cards */
+    .card {
+      background: var(--bg-card);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--bg-card-border);
+      border-radius: 14px;
+      padding: 1.25rem;
+      box-shadow: var(--glass-shadow);
+      margin-bottom: 1.5rem;
+    }
+
+    .card-title {
+      font-size: 0.95rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--accent-cyan);
+      margin-bottom: 1rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    /* Controls Panel */
+    .control-group {
+      margin-bottom: 1.2rem;
+    }
+
+    .control-group label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 0.4rem;
+    }
+
+    .slider-container {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    input[type="range"] {
+      flex: 1;
+      accent-color: var(--accent-cyan);
+      cursor: pointer;
+    }
+
+    .val-display {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: var(--accent-cyan);
+      min-width: 48px;
+      text-align: right;
+    }
+
+    select, input[type="number"], input[type="text"] {
+      width: 100%;
+      padding: 0.55rem 0.75rem;
+      background: rgba(13, 22, 38, 0.8);
+      border: 1px solid var(--bg-card-border);
+      border-radius: 8px;
+      color: var(--text-main);
+      font-family: inherit;
+      font-size: 0.85rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    select:focus, input:focus {
+      border-color: var(--accent-cyan);
+    }
+
+    .btn-row {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+
+    .btn {
+      flex: 1;
+      padding: 0.6rem 0.8rem;
+      border: none;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 0.8rem;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.4rem;
+      transition: all 0.2s ease;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
+      color: #040914;
+    }
+    .btn-primary:hover {
+      box-shadow: 0 0 12px rgba(0, 242, 254, 0.4);
+      transform: translateY(-1px);
+    }
+
+    .btn-warning {
+      background: rgba(245, 158, 11, 0.2);
+      border: 1px solid rgba(245, 158, 11, 0.5);
+      color: var(--accent-amber);
+    }
+    .btn-warning:hover {
+      background: rgba(245, 158, 11, 0.3);
+    }
+
+    .btn-danger {
+      background: rgba(239, 68, 68, 0.2);
+      border: 1px solid rgba(239, 68, 68, 0.5);
+      color: var(--accent-rose);
+    }
+    .btn-danger:hover {
+      background: rgba(239, 68, 68, 0.3);
+    }
+
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text-main);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+    }
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.15);
+    }
+
+    /* Main Telemetry Grid */
+    .telemetry-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .gauge-card {
+      background: rgba(13, 20, 35, 0.6);
+      border: 1px solid var(--bg-card-border);
+      border-radius: 10px;
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .gauge-card::after {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 4px;
+      height: 100%;
+      background: var(--accent-cyan);
+    }
+
+    .gauge-card.warn::after { background: var(--accent-amber); }
+    .gauge-card.alert::after { background: var(--accent-rose); }
+    .gauge-card.success::after { background: var(--accent-green); }
+
+    .gauge-label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .gauge-value {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1.7rem;
+      font-weight: 700;
+      color: var(--text-main);
+      margin: 0.4rem 0;
+    }
+
+    .gauge-unit {
+      font-size: 0.8rem;
+      color: var(--text-dim);
+      font-weight: 400;
+      margin-left: 0.3rem;
+    }
+
+    .gauge-subtext {
+      font-size: 0.72rem;
+      color: var(--text-dim);
+      display: flex;
+      justify-content: space-between;
+    }
+
+    /* Cylinder Grid */
+    .cylinder-group {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 0.75rem;
+      margin-top: 0.5rem;
+    }
+
+    .cylinder-box {
+      background: rgba(8, 14, 26, 0.8);
+      border: 1px solid var(--bg-card-border);
+      border-radius: 8px;
+      padding: 0.6rem;
+      text-align: center;
+      transition: all 0.3s ease;
+    }
+
+    .cylinder-box.faulted {
+      border-color: var(--accent-rose);
+      background: rgba(239, 68, 68, 0.1);
+    }
+
+    .cyl-name {
+      font-size: 0.7rem;
+      font-weight: 700;
+      color: var(--text-muted);
+    }
+
+    .cyl-val {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1.15rem;
+      font-weight: 700;
+      margin: 0.2rem 0;
+    }
+
+    .cyl-bar {
+      height: 4px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 2px;
+      overflow: hidden;
+      margin-top: 0.3rem;
+    }
+
+    .cyl-bar-fill {
+      height: 100%;
+      background: var(--accent-cyan);
+      width: 0%;
+      transition: width 0.3s ease, background-color 0.3s ease;
+    }
+
+    /* Active Faults List */
+    .fault-tag {
+      background: rgba(239, 68, 68, 0.15);
+      border: 1px solid rgba(239, 68, 68, 0.4);
+      color: #fca5a5;
+      padding: 0.4rem 0.6rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      margin-bottom: 0.4rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      animation: fadeIn 0.3s ease;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* JSON Inspector */
+    pre {
+      background: #040710;
+      border: 1px solid var(--bg-card-border);
+      border-radius: 8px;
+      padding: 0.75rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+      color: #38bdf8;
+      max-height: 220px;
+      overflow: auto;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Nav -->
+  <header>
+    <div class="brand-section">
+      <div class="logo-badge">DRDO / SIH26054</div>
+      <div class="brand-title">
+        <h1>Rotax 914 MALE UAV Digital Twin</h1>
+        <p>Physics Engine Telemetry & Fault Injection Bridge (WebSocket :8000/ws/engine)</p>
+      </div>
+    </div>
+    <div class="status-badge-container">
+      <div id="simTimeBadge" style="font-family: 'JetBrains Mono'; font-size: 0.85rem; color: var(--text-muted);">T: 0.0s</div>
+      <div class="ws-badge" id="wsStatusBadge">
+        <span class="pulse-dot"></span>
+        <span id="wsStatusText">Connecting...</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ML Health & Anomaly Detection Banner -->
+  <div id="mlAlertBanner" style="max-width: 1440px; margin: 1rem auto 0; padding: 0.75rem 1.5rem; border-radius: 10px; background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.35); display: flex; justify-content: space-between; align-items: center; transition: all 0.3s ease;">
+    <div style="display: flex; align-items: center; gap: 0.75rem;">
+      <span style="font-weight: 800; font-size: 0.75rem; background: var(--accent-green); color: #040914; padding: 0.2rem 0.6rem; border-radius: 4px;" id="mlBadge">ML NOMINAL</span>
+      <span style="font-size: 0.85rem; font-weight: 500;" id="mlMsg">AI & Physics Rule Engine: All engine parameters operating within nominal bounds.</span>
+    </div>
+    <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: var(--text-muted);">Health Index: <strong id="valHealthIdx" style="color: var(--accent-cyan);">1.0000</strong></div>
+  </div>
+
+  <div class="dashboard-grid">
+
+    <!-- Left Controls Panel -->
+    <div>
+      <!-- Simulation & Throttle Controls -->
+      <div class="card">
+        <div class="card-title">Flight & Throttle Control</div>
+        
+        <div class="control-group">
+          <label>Throttle Position (<span id="throttleDisplay">65%</span>)</label>
+          <div class="slider-container">
+            <input type="range" id="throttleSlider" min="0" max="100" value="65">
+          </div>
+        </div>
+
+        <div class="btn-row">
+          <button class="btn btn-primary" id="btnManualThrottle">Set Manual</button>
+          <button class="btn btn-secondary" id="btnResumeMission">Auto Mission</button>
+        </div>
+
+        <hr style="border: 0; border-top: 1px solid var(--bg-card-border); margin: 1rem 0;">
+
+        <div class="card-title" style="font-size: 0.8rem;">Simulation State</div>
+        <div class="btn-row">
+          <button class="btn btn-secondary" id="btnPauseResume">Pause</button>
+          <button class="btn btn-danger" id="btnResetSim">Reset Cold</button>
+        </div>
+      </div>
+
+      <!-- Fault Injection Console -->
+      <div class="card">
+        <div class="card-title">Fault Injection (PS 8 Categories)</div>
+        
+        <div class="control-group">
+          <label>Select Fault Type</label>
+          <select id="faultKindSelect">
+            <option value="misfire">Misfire (Loss of Combustion)</option>
+            <option value="injector_abnormal">Injector Abnormal (Lean/Rich)</option>
+            <option value="cooling_degradation">Cooling Fin Blockage / Degradation</option>
+            <option value="lubrication_issue">Lubrication Issue / Oil Leak</option>
+            <option value="combustion_instability">Combustion Instability / RPM Surge</option>
+            <option value="overheating_trend">Overheating Trend (Slow Heat Soak)</option>
+            <option value="abnormal_vibration">Abnormal Vibration (Prop Unbalance 1X)</option>
+            <option value="sensor_drift">Sensor Drift (Measurement Only)</option>
+            <option value="regulator_failure">Regulator Failure (Voltage Jitter)</option>
+          </select>
+        </div>
+
+        <div class="control-group" id="cylinderGroup">
+          <label>Target Cylinder</label>
+          <select id="faultCylinderSelect">
+            <option value="0">Cylinder #1 (Index 0)</option>
+            <option value="1" selected>Cylinder #2 (Index 1)</option>
+            <option value="2">Cylinder #3 (Index 2)</option>
+            <option value="3">Cylinder #4 (Index 3)</option>
+          </select>
+        </div>
+
+        <div class="control-group">
+          <label>Severity (<span id="severityDisplay">80%</span>)</label>
+          <div class="slider-container">
+            <input type="range" id="severitySlider" min="10" max="100" value="80">
+          </div>
+        </div>
+
+        <div class="control-group">
+          <label>Ramp Time (Seconds)</label>
+          <input type="number" id="rampTimeInput" value="30" min="1" max="180">
+        </div>
+
+        <div class="btn-row">
+          <button class="btn btn-warning" id="btnInjectFault">Inject Fault</button>
+          <button class="btn btn-danger" id="btnClearFaults">Clear All</button>
+        </div>
+
+        <div style="margin-top: 1rem;">
+          <label style="font-size: 0.75rem; color: var(--text-muted); font-weight: 700;">Active Faults:</label>
+          <div id="activeFaultsList" style="margin-top: 0.4rem;">
+            <div style="font-size: 0.75rem; color: var(--text-dim); font-style: italic;">No active faults (Nominal state)</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Quick Links for Downstream Teams -->
+      <div class="card">
+        <div class="card-title" style="font-size: 0.8rem;">Downstream Endpoints</div>
+        <div style="font-size: 0.75rem; color: var(--text-muted); line-height: 1.6;">
+          <div><strong>WebSocket:</strong> <code>ws://localhost:8000/ws/engine</code></div>
+          <div><strong>REST API Status:</strong> <a href="/api/status" target="_blank" style="color: var(--accent-cyan);">/api/status</a></div>
+          <div><strong>OpenAPI Docs:</strong> <a href="/docs" target="_blank" style="color: var(--accent-cyan);">/docs (Swagger)</a></div>
+          <div><strong>Mission Replay Data:</strong> <a href="/api/mission/replay" target="_blank" style="color: var(--accent-cyan);">/api/mission/replay</a></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Live Telemetry Display -->
+    <div>
+      <!-- Primary Core Gauges -->
+      <div class="telemetry-row">
+        <div class="gauge-card" id="cardRpm">
+          <div class="gauge-label">Engine Speed</div>
+          <div class="gauge-value"><span id="valRpm">0.0</span><span class="gauge-unit">RPM</span></div>
+          <div class="gauge-subtext"><span>Idle: 1400</span><span>Max: 5800</span></div>
+        </div>
+
+        <div class="gauge-card" id="cardOilPressure">
+          <div class="gauge-label">Oil Pressure</div>
+          <div class="gauge-value"><span id="valOilP">0.00</span><span class="gauge-unit">bar</span></div>
+          <div class="gauge-subtext"><span>Nominal: 2.0 - 5.0</span><span>Relief: 5.5</span></div>
+        </div>
+
+        <div class="gauge-card" id="cardOilTemp">
+          <div class="gauge-label">Oil Temperature</div>
+          <div class="gauge-value"><span id="valOilT">0.0</span><span class="gauge-unit">°C</span></div>
+          <div class="gauge-subtext"><span>Min: 50°C</span><span>Max: 130°C</span></div>
+        </div>
+
+        <div class="gauge-card" id="cardFuelFlow">
+          <div class="gauge-label">Fuel Flow</div>
+          <div class="gauge-value"><span id="valFuel">0.00000</span><span class="gauge-unit">kg/s</span></div>
+          <div class="gauge-subtext"><span>Speed-Density</span><span>Heywood Eq.</span></div>
+        </div>
+      </div>
+
+      <!-- CHT Per Cylinder -->
+      <div class="card">
+        <div class="card-title">
+          <span>Cylinder Head Temperature (CHT ×4)</span>
+          <span style="font-size: 0.75rem; color: var(--text-dim); text-transform: none;">Max Limit: 135°C</span>
+        </div>
+        <div class="cylinder-group">
+          <div class="cylinder-box" id="boxCht0">
+            <div class="cyl-name">CYL 1</div>
+            <div class="cyl-val" id="valCht0">--</div>
+            <div class="cyl-bar"><div class="cyl-bar-fill" id="barCht0"></div></div>
+          </div>
+          <div class="cylinder-box" id="boxCht1">
+            <div class="cyl-name">CYL 2</div>
+            <div class="cyl-val" id="valCht1">--</div>
+            <div class="cyl-bar"><div class="cyl-bar-fill" id="barCht1"></div></div>
+          </div>
+          <div class="cylinder-box" id="boxCht2">
+            <div class="cyl-name">CYL 3</div>
+            <div class="cyl-val" id="valCht2">--</div>
+            <div class="cyl-bar"><div class="cyl-bar-fill" id="barCht2"></div></div>
+          </div>
+          <div class="cylinder-box" id="boxCht3">
+            <div class="cyl-name">CYL 4</div>
+            <div class="cyl-val" id="valCht3">--</div>
+            <div class="cyl-bar"><div class="cyl-bar-fill" id="barCht3"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- EGT Per Cylinder -->
+      <div class="card">
+        <div class="card-title">
+          <span>Exhaust Gas Temperature (EGT ×4)</span>
+          <span style="font-size: 0.75rem; color: var(--text-dim); text-transform: none;">Nominal ~850-880°C | Misfire crashes ~390°C</span>
+        </div>
+        <div class="cylinder-group">
+          <div class="cylinder-box" id="boxEgt0">
+            <div class="cyl-name">CYL 1</div>
+            <div class="cyl-val" id="valEgt0">--</div>
+            <div class="cyl-bar"><div class="cyl-bar-fill" id="barEgt0" style="background: #f97316;"></div></div>
+          </div>
+          <div class="cylinder-box" id="boxEgt1">
+            <div class="cyl-name">CYL 2</div>
+            <div class="cyl-val" id="valEgt1">--</div>
+            <div class="cyl-bar"><div class="cyl-bar-fill" id="barEgt1" style="background: #f97316;"></div></div>
+          </div>
+          <div class="cylinder-box" id="boxEgt2">
+            <div class="cyl-name">CYL 3</div>
+            <div class="cyl-val" id="valEgt2">--</div>
+            <div class="cyl-bar"><div class="cyl-bar-fill" id="barEgt2" style="background: #f97316;"></div></div>
+          </div>
+          <div class="cylinder-box" id="boxEgt3">
+            <div class="cyl-name">CYL 4</div>
+            <div class="cyl-val" id="valEgt3">--</div>
+            <div class="cyl-bar"><div class="cyl-bar-fill" id="barEgt3" style="background: #f97316;"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Secondary Telemetry Row -->
+      <div class="telemetry-row">
+        <div class="gauge-card" id="cardVibration">
+          <div class="gauge-label">Vibration RMS</div>
+          <div class="gauge-value"><span id="valVib">0.000</span><span class="gauge-unit">g</span></div>
+          <div class="gauge-subtext"><span>1X Unbalance + 0.5X Cam</span></div>
+        </div>
+
+        <div class="gauge-card" id="cardAlternator">
+          <div class="gauge-label">Alternator Voltage</div>
+          <div class="gauge-value"><span id="valAltV">0.00</span><span class="gauge-unit">V</span></div>
+          <div class="gauge-subtext"><span>Regulated: 14.2V</span></div>
+        </div>
+
+        <div class="gauge-card" id="cardAltitude">
+          <div class="gauge-label">Flight Altitude</div>
+          <div class="gauge-value"><span id="valAltM">0.0</span><span class="gauge-unit">m</span></div>
+          <div class="gauge-subtext"><span>ISA Troposphere Model</span></div>
+        </div>
+
+        <div class="gauge-card" id="cardAmbient">
+          <div class="gauge-label">Ambient Temp</div>
+          <div class="gauge-value"><span id="valAmbT">0.0</span><span class="gauge-unit">°C</span></div>
+          <div class="gauge-subtext"><span>Outside Air Temp</span></div>
+        </div>
+      </div>
+
+      <!-- Live JSON Frame Stream (Section 7.1 Payload) -->
+      <div class="card">
+        <div class="card-title">
+          <span>Live WebSocket JSON Frame (Exact §7.1 Schema)</span>
+          <span style="font-size: 0.72rem; color: var(--text-dim);">Consumed by Unity NativeWebSocket & Web Dashboard</span>
+        </div>
+        <pre id="jsonInspector">Waiting for WebSocket frames...</pre>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    let socket = null;
+    let isPaused = false;
+
+    // Elements
+    const wsBadge = document.getElementById('wsStatusBadge');
+    const wsText = document.getElementById('wsStatusText');
+    const simTimeBadge = document.getElementById('simTimeBadge');
+    const jsonInspector = document.getElementById('jsonInspector');
+
+    const throttleSlider = document.getElementById('throttleSlider');
+    const throttleDisplay = document.getElementById('throttleDisplay');
+    const btnManualThrottle = document.getElementById('btnManualThrottle');
+    const btnResumeMission = document.getElementById('btnResumeMission');
+
+    const btnPauseResume = document.getElementById('btnPauseResume');
+    const btnResetSim = document.getElementById('btnResetSim');
+
+    const faultKindSelect = document.getElementById('faultKindSelect');
+    const faultCylinderSelect = document.getElementById('faultCylinderSelect');
+    const cylinderGroup = document.getElementById('cylinderGroup');
+    const severitySlider = document.getElementById('severitySlider');
+    const severityDisplay = document.getElementById('severityDisplay');
+    const rampTimeInput = document.getElementById('rampTimeInput');
+    const btnInjectFault = document.getElementById('btnInjectFault');
+    const btnClearFaults = document.getElementById('btnClearFaults');
+    const activeFaultsList = document.getElementById('activeFaultsList');
+
+    // Telemetry displays
+    const valRpm = document.getElementById('valRpm');
+    const valOilP = document.getElementById('valOilP');
+    const valOilT = document.getElementById('valOilT');
+    const valFuel = document.getElementById('valFuel');
+    const valVib = document.getElementById('valVib');
+    const valAltV = document.getElementById('valAltV');
+    const valAltM = document.getElementById('valAltM');
+    const valAmbT = document.getElementById('valAmbT');
+
+    // Sliders event listeners
+    throttleSlider.addEventListener('input', (e) => {
+      throttleDisplay.innerText = `${e.target.value}%`;
+    });
+
+    severitySlider.addEventListener('input', (e) => {
+      severityDisplay.innerText = `${e.target.value}%`;
+    });
+
+    faultKindSelect.addEventListener('change', (e) => {
+      const val = e.target.value;
+      if (val === 'misfire' || val === 'injector_abnormal') {
+        cylinderGroup.style.display = 'block';
+      } else {
+        cylinderGroup.style.display = 'none';
+      }
+    });
+
+    // WebSocket Connection
+    function connectWebSocket() {
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${proto}//${window.location.host}/ws/engine`;
+      
+      socket = new WebSocket(wsUrl);
+
+      socket.onopen = () => {
+        wsBadge.classList.remove('disconnected');
+        wsText.innerText = 'Connected (5Hz)';
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          updateTelemetry(data);
+        } catch (e) {
+          console.error("Failed to parse telemetry:", e);
+        }
+      };
+
+      socket.onclose = () => {
+        wsBadge.classList.add('disconnected');
+        wsText.innerText = 'Disconnected';
+        setTimeout(connectWebSocket, 2000);
+      };
+
+      socket.onerror = (err) => {
+        console.error("WS Error:", err);
+        socket.close();
+      };
+    }
+
+    function updateTelemetry(data) {
+      simTimeBadge.innerText = `T: ${data.t.toFixed(1)}s`;
+      valRpm.innerText = data.rpm.toFixed(0);
+      valOilP.innerText = data.oil_pressure_bar.toFixed(2);
+      valOilT.innerText = data.oil_temp_c.toFixed(1);
+      valFuel.innerText = data.fuel_flow_kg_s.toFixed(5);
+      valVib.innerText = data.vibration_rms_g.toFixed(3);
+      valAltV.innerText = data.alternator_v.toFixed(2);
+      valAltM.innerText = data.altitude_m.toFixed(0);
+      valAmbT.innerText = data.ambient_c.toFixed(1);
+
+      // CHT updates
+      if (data.cht_c && data.cht_c.length === 4) {
+        for (let i = 0; i < 4; i++) {
+          const val = data.cht_c[i];
+          document.getElementById(`valCht${i}`).innerText = `${val.toFixed(1)}°C`;
+          const pct = Math.min(100, Math.max(0, (val / 140) * 100));
+          const bar = document.getElementById(`barCht${i}`);
+          bar.style.width = `${pct}%`;
+          if (val > 120) {
+            bar.style.background = 'var(--accent-rose)';
+          } else if (val > 100) {
+            bar.style.background = 'var(--accent-amber)';
+          } else {
+            bar.style.background = 'var(--accent-cyan)';
+          }
+        }
+      }
+
+      // EGT updates
+      if (data.egt_c && data.egt_c.length === 4) {
+        for (let i = 0; i < 4; i++) {
+          const val = data.egt_c[i];
+          document.getElementById(`valEgt${i}`).innerText = `${val.toFixed(0)}°C`;
+          const pct = Math.min(100, Math.max(0, (val / 1000) * 100));
+          const bar = document.getElementById(`barEgt${i}`);
+          const box = document.getElementById(`boxEgt${i}`);
+          bar.style.width = `${pct}%`;
+          // If EGT dropped below 600 while others are high, indicate misfire
+          if (val < 500 && data.rpm > 2000) {
+            box.classList.add('faulted');
+          } else {
+            box.classList.remove('faulted');
+          }
+        }
+      }
+
+      // Highlight vibration card if anomalous
+      const cardVib = document.getElementById('cardVibration');
+      if (data.vibration_rms_g > 0.25) {
+        cardVib.className = 'gauge-card alert';
+      } else if (data.vibration_rms_g > 0.15) {
+        cardVib.className = 'gauge-card warn';
+      } else {
+        cardVib.className = 'gauge-card success';
+      }
+
+      // ML Health & Anomaly Banner update
+      if (data.diagnostics && data.diagnostics.ml_diagnostics) {
+        const ml = data.diagnostics.ml_diagnostics;
+        const banner = document.getElementById('mlAlertBanner');
+        const badge = document.getElementById('mlBadge');
+        const msg = document.getElementById('mlMsg');
+        const hVal = document.getElementById('valHealthIdx');
+
+        if (hVal && ml.health_index !== undefined) {
+          hVal.innerText = ml.health_index.toFixed(4);
+        }
+
+        if (ml.anomaly_detected) {
+          banner.style.background = 'rgba(239, 68, 68, 0.2)';
+          banner.style.borderColor = 'rgba(239, 68, 68, 0.6)';
+          badge.style.background = 'var(--accent-rose)';
+          badge.innerText = `ANOMALY: ${ml.fault_type.toUpperCase()}`;
+          msg.innerText = ml.message;
+        } else {
+          banner.style.background = 'rgba(16, 185, 129, 0.15)';
+          banner.style.borderColor = 'rgba(16, 185, 129, 0.35)';
+          badge.style.background = 'var(--accent-green)';
+          badge.innerText = 'ML NOMINAL';
+          msg.innerText = ml.message || 'AI & Physics Rule Engine: All engine parameters operating within nominal bounds.';
+        }
+      }
+
+      // Format JSON inspector
+      jsonInspector.innerText = JSON.stringify(data, null, 2);
+    }
+
+    // Button actions
+    btnManualThrottle.addEventListener('click', async () => {
+      const val = parseFloat(throttleSlider.value) / 100.0;
+      await fetch('/api/control/throttle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ throttle: val, manual: true })
+      });
+    });
+
+    btnResumeMission.addEventListener('click', async () => {
+      await fetch('/api/control/throttle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ throttle: 0.65, manual: false })
+      });
+    });
+
+    btnPauseResume.addEventListener('click', async () => {
+      isPaused = !isPaused;
+      const endpoint = isPaused ? '/api/control/pause' : '/api/control/resume';
+      btnPauseResume.innerText = isPaused ? 'Resume' : 'Pause';
+      btnPauseResume.className = isPaused ? 'btn btn-primary' : 'btn btn-secondary';
+      await fetch(endpoint, { method: 'POST' });
+    });
+
+    btnResetSim.addEventListener('click', async () => {
+      if (confirm("Reset simulation to cold/idle state?")) {
+        await fetch('/api/control/reset', { method: 'POST' });
+        refreshFaultsList();
+      }
+    });
+
+    btnInjectFault.addEventListener('click', async () => {
+      const kind = faultKindSelect.value;
+      const severity = parseFloat(severitySlider.value) / 100.0;
+      const cyl = (kind === 'misfire' || kind === 'injector_abnormal') ? parseInt(faultCylinderSelect.value) : null;
+      const ramp_s = parseFloat(rampTimeInput.value);
+
+      const res = await fetch('/api/faults/inject', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kind: kind,
+          severity: severity,
+          cylinder: cyl,
+          ramp_s: ramp_s,
+          start_in_s: 0.0
+        })
+      });
+
+      if (res.ok) {
+        refreshFaultsList();
+      }
+    });
+
+    btnClearFaults.addEventListener('click', async () => {
+      await fetch('/api/faults/clear', { method: 'POST' });
+      refreshFaultsList();
+    });
+
+    async function refreshFaultsList() {
+      try {
+        const res = await fetch('/api/faults');
+        const data = await res.json();
+        const list = data.active_faults || [];
+        if (list.length === 0) {
+          activeFaultsList.innerHTML = '<div style="font-size: 0.75rem; color: var(--text-dim); font-style: italic;">No active faults (Nominal state)</div>';
+        } else {
+          activeFaultsList.innerHTML = list.map(f => `
+            <div class="fault-tag">
+              <span><strong>#${f.id} ${f.kind}</strong> ${f.cylinder !== null ? `(Cyl ${f.cylinder + 1})` : ''}</span>
+              <span>${Math.round(f.severity * 100)}% sev | +${f.ramp_s}s</span>
+            </div>
+          `).join('');
+        }
+      } catch (e) {
+        console.error("Error fetching faults list:", e);
+      }
+    }
+
+    // Start
+    connectWebSocket();
+    setInterval(refreshFaultsList, 3000);
+  </script>
+</body>
+</html>
