@@ -13,7 +13,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import './index.css';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('engine_3d_simulation');
+  const [activeTab, setActiveTab] = useState('simulation');
   const [telemetry, setTelemetry] = useState(INITIAL_TELEMETRY);
 
   // Connect to live WebSocket stream if backend is online
@@ -69,8 +69,8 @@ export default function App() {
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
-      if (e.key === '1') setActiveTab('engine_3d_simulation');
-      if (e.key === '2') setActiveTab('simulation');
+      if (e.key === '1') setActiveTab('simulation');
+      if (e.key === '2') setActiveTab('engine_3d_simulation');
       if (e.key === '3') setActiveTab('livestats');
       if (e.key === '4') setActiveTab('livestats_graph');
       if (e.key === '5') setActiveTab('ideal_real');

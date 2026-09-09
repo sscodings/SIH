@@ -18,8 +18,8 @@ export function TopBar({ activeTab, setActiveTab, telemetry }) {
   }, []);
 
   const tabs = [
-    { id: 'engine_3d_simulation', num: '1', label: '1. 3D DIGITAL TWIN' },
-    { id: 'simulation', num: '2', label: '2. UAV SCHEMATIC' },
+    { id: 'simulation', num: '1', label: '1. UAV SCHEMATIC' },
+    { id: 'engine_3d_simulation', num: '2', label: '2. 3D DIGITAL TWIN' },
     { id: 'livestats', num: '3', label: '3. LIVE STATS' },
     { id: 'livestats_graph', num: '4', label: '4. LIVE STATS & GRAPH' },
     { id: 'ideal_real', num: '5', label: '5. IDEAL VS REAL' },
