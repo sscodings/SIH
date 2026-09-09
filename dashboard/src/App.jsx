@@ -1,90 +1,127 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
+import { INITIAL_TELEMETRY } from './data/telemetryData';
 import { useEngineTelemetry } from './hooks/useEngineTelemetry';
-import { ControlBar } from './components/ControlBar';
-import { FaultBanner } from './components/FaultBanner';
-import { EngineViewport } from './components/EngineViewport';
-import { StatusReadout } from './components/StatusReadout';
+import { TopBar } from './components/TopBar';
+import { FooterBar } from './components/FooterBar';
+import { ScreenSimulation } from './components/ScreenSimulation';
+import { ScreenLiveStats } from './components/ScreenLiveStats';
+import { ScreenLiveStatsAndGraph } from './components/ScreenLiveStatsAndGraph';
+import { ScreenIdealVsReal } from './components/ScreenIdealVsReal';
+import { ScreenHealthSummary } from './components/ScreenHealthSummary';
+import { ScreenEngine3DSimulation } from './components/ScreenEngine3DSimulation';
 import './index.css';
 
 export default function App() {
-  const { telemetry, isConnected, sendCommand } = useEngineTelemetry();
+  const [activeTab, setActiveTab] = useState('simulation');
+  const [telemetry, setTelemetry] = useState(INITIAL_TELEMETRY);
+
+  // Connect to live WebSocket stream if backend is online
+  const { telemetry: wsLiveTelemetry, isConnected, sendCommand } = useEngineTelemetry();
+
+  // Synchronize incoming live websocket telemetry into the HUD data store
+  useEffect(() => {
+    if (wsLiveTelemetry && isConnected) {
+      setTelemetry(prev => {
+        const liveRpm = Math.round(wsLiveTelemetry.rpm || prev.rpm);
+        const liveCht = wsLiveTelemetry.cht_c ? Number(Math.max(...wsLiveTelemetry.cht_c).toFixed(1)) : prev.cht;
+        const liveEgt = wsLiveTelemetry.egt_c ? Number(Math.max(...wsLiveTelemetry.egt_c).toFixed(1)) : prev.egt;
+        const liveOilP = wsLiveTelemetry.oil_pressure_bar ? Number(wsLiveTelemetry.oil_pressure_bar.toFixed(1)) : prev.oilPressureBar;
+        const liveOilT = wsLiveTelemetry.oil_temp_c ? Number(wsLiveTelemetry.oil_temp_c.toFixed(1)) : prev.oilTempC;
+        const liveVib = wsLiveTelemetry.vibration_rms_g ? Number(wsLiveTelemetry.vibration_rms_g.toFixed(2)) : prev.vibrationRmsG;
+        const liveFuelLh = wsLiveTelemetry.fuel_flow_kg_s ? Number((wsLiveTelemetry.fuel_flow_kg_s * 3600 / 0.72).toFixed(2)) : prev.fuelFlowLh;
+
+        return {
+          ...prev,
+          rpm: liveRpm,
+          cht: liveCht,
+          egt: liveEgt,
+          oilPressureBar: liveOilP,
+          oilTempC: liveOilT,
+          fuelFlowLh: liveFuelLh,
+          vibrationRmsG: liveVib,
+          s2: {
+            ...prev.s2,
+            rpm: liveRpm,
+            cht: liveCht,
+            egt: liveEgt,
+            oilPress: liveOilP,
+            oilTemp: liveOilT,
+            fuelFlow: Number((liveFuelLh).toFixed(1)),
+            vibRms: liveVib,
+          }
+        };
+      });
+    }
+  }, [wsLiveTelemetry, isConnected]);
+
+  // Keyboard Navigation: 1-5 keys for mission control tab switching
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+      if (e.key === '1') setActiveTab('simulation');
+      if (e.key === '2') setActiveTab('livestats');
+      if (e.key === '3') setActiveTab('livestats_graph');
+      if (e.key === '4') setActiveTab('ideal_real');
+      if (e.key === '5') setActiveTab('health_summary');
+      if (e.key === 'Escape' && activeTab === 'engine_3d_simulation') setActiveTab('simulation');
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeTab]);
 
   return (
-    <div className="dashboard-app">
-      {/* Tactical Header */}
-      <header className="dashboard-header">
-        <div className="header-brand">
-          <div className="brand-icon">R914</div>
-          <div>
-            <h1 className="brand-title">Rotax 914F Aero Piston Engine Digital Twin</h1>
-            <div className="brand-subtitle">
-              MALE UAV Real-Time Telemetry, 3-Layer Hybrid AI/ML Diagnostics & Prognostics
-            </div>
-          </div>
-        </div>
+    <div className="uav-grid-bg">
+      <div className="uav-app-container">
+        {/* Persistent Top Navigation Bar */}
+        <TopBar
+          activeTab={activeTab === 'engine_3d_simulation' ? 'simulation' : activeTab}
+          setActiveTab={setActiveTab}
+          telemetry={telemetry}
+        />
 
-        <div className="header-badges">
-          <span className="badge" style={{ background: 'rgba(51, 65, 85, 0.4)', color: 'var(--text-muted)' }}>
-            IAI Heron / MALE UAV
-          </span>
-          <span className={`badge ${isConnected ? 'badge-connected' : 'badge-disconnected'}`}>
-            <span
-              style={{
-                display: 'inline-block',
-                width: 6,
-                height: 6,
-                borderRadius: '50%',
-                backgroundColor: isConnected ? 'var(--accent-emerald)' : 'var(--accent-rose)',
-              }}
+        {/* Main Tab Screen Viewport */}
+        <main className="uav-main-viewport">
+          {activeTab === 'simulation' && (
+            <ScreenSimulation
+              telemetry={telemetry}
+              onOpenSimulation={() => setActiveTab('engine_3d_simulation')}
             />
-            {isConnected ? 'LIVE TELEMETRY' : 'CONNECTING...'}
-          </span>
-        </div>
-      </header>
+          )}
 
-      {/* Control Bar */}
-      <ControlBar
-        telemetry={telemetry}
-        isConnected={isConnected}
-        sendCommand={sendCommand}
-      />
+          {activeTab === 'engine_3d_simulation' && (
+            <ScreenEngine3DSimulation
+              telemetry={telemetry}
+              wsTelemetry={wsLiveTelemetry}
+              isConnected={isConnected}
+              sendCommand={sendCommand}
+              onBack={() => setActiveTab('simulation')}
+            />
+          )}
 
-      {/* 3-Layer AI/ML Fault Banner */}
-      <FaultBanner telemetry={telemetry} />
+          {activeTab === 'livestats' && (
+            <ScreenLiveStats telemetry={telemetry} />
+          )}
 
-      {/* 3D Model Viewport and Parameter Readouts side-by-side */}
-      <main className="main-content-grid">
-        <div className="viewport-column">
-          <EngineViewport telemetry={telemetry} />
-        </div>
+          {activeTab === 'livestats_graph' && (
+            <ScreenLiveStatsAndGraph telemetry={telemetry} />
+          )}
 
-        <div className="readout-column">
-          <StatusReadout telemetry={telemetry} />
-        </div>
-      </main>
+          {activeTab === 'ideal_real' && (
+            <ScreenIdealVsReal telemetry={telemetry} />
+          )}
 
-      {/* Footer System Status */}
-      <footer
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          padding: '12px 16px',
-          backgroundColor: 'var(--panel-bg)',
-          border: '1px solid var(--card-border)',
-          borderRadius: 'var(--radius-lg)',
-          fontFamily: 'var(--font-mono)',
-          fontSize: '11px',
-          color: 'var(--text-dim)',
-        }}
-      >
-        <span>
-          SIH26054 (DRDO) Digital Twin System | Rotax 914F Aero Piston Turbocharged Engine
-        </span>
-        <span>
-          Architecture: L1 Physics Rules + L2 8-Fault Supervised Classifier + L3 Autoencoder Novelty Anomaly Detector
-        </span>
-      </footer>
+          {activeTab === 'health_summary' && (
+            <ScreenHealthSummary telemetry={telemetry} />
+          )}
+        </main>
+
+        {/* Persistent Tactical Footer Bar */}
+        <FooterBar
+          activeTab={activeTab === 'engine_3d_simulation' ? 'simulation' : activeTab}
+          telemetry={telemetry}
+        />
+      </div>
     </div>
   );
 }
