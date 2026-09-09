@@ -21,7 +21,8 @@ from engine_physics import (
     RPM_TARGET, POWER_FRACTION, AFR_TARGET, RATED_RPM,
     compute_map_pa, compute_air_mass_flow, compute_fuel_density,
     compute_afr_phi, compute_egt, step_cht, step_oil_temp,
-    vogel_viscosity, hagen_poiseuille_oil_pressure, vibration_frequencies,
+    vft_viscosity, vogel_viscosity, hagen_poiseuille_oil_pressure,
+    vibration_frequencies, compute_vibration_orders,
     cylinder_egt_spread, health_index_step,
 )
 
@@ -33,24 +34,38 @@ T_OIL_NOM_C = 95.0
 K_WEAR = 2e-13  # ASSUMED wear-rate calibration constant, tuned so a 15-20hr mission
                  # with a real fault shows visible but non-catastrophic health decline
 
-# Which missions get an injected fault, and what kind (for later ML labeling)
+# Which missions get an injected fault, and what kind (for the 8-fault architecture)
 FAULT_MISSIONS = {
-    5: "lubrication_degradation",   # oil pressure will be artificially suppressed
-    11: "cooling_degradation",      # h_eff reduced mid-mission -> rising CHT
-    13: "misfire",                  # large EGT cylinder spread injected
+    2: "overheating_trends",        # hot desert extreme ambient OAT, high CHT but normal Delta_CHT_ambient
+    3: "abnormal_vibration",        # mechanical unbalance / bearing wear, 1x order spike
+    5: "lubrication_issues",        # oil pressure loss + late-stage vibration rise
+    7: "injector_abnormalities",    # dual-carburetor bank 1 vs bank 2 metering imbalance
+    8: "sensor_drift",              # sensor channel drift while physical state remains normal
+    9: "combustion_instability",    # cyclic RPM fluctuation and erratic EGT variance
+    11: "cooling_degradation",      # radiator/coolant failure -> Delta_CHT_ambient > 115C
+    13: "misfire",                  # single cylinder EGT drop + cam order vibration surge
 }
 
 
 def simulate_mission(df_mission, rng):
     df_mission = df_mission.sort_values("elapsed_min").reset_index(drop=True)
     n = len(df_mission)
-    mission_id = df_mission["mission_id"].iloc[0]
+    mission_id = int(df_mission["mission_id"].iloc[0])
     fault_type = FAULT_MISSIONS.get(mission_id, None)
 
     # State variables carried across timesteps
     cht_c = df_mission["OAT_C"].iloc[0] + 20.0  # start near ambient + warm-up margin
     oil_temp_c = df_mission["OAT_C"].iloc[0] + 15.0
     health_index = 1.0
+
+    # Fault trigger thresholds
+    fault_start_min = int(n * (
+        0.30 if fault_type in ["lubrication_issues", "overheating_trends"]
+        else 0.35 if fault_type == "sensor_drift"
+        else 0.40 if fault_type in ["cooling_degradation", "injector_abnormalities"]
+        else 0.45 if fault_type == "combustion_instability"
+        else 0.50
+    )) if fault_type else 999999
 
     rows = []
     for i in range(n):
@@ -61,46 +76,84 @@ def simulate_mission(df_mission, rng):
         air_density = row["air_density_kg_m3"]
         altitude_ft = row["altitude_ft"]
         wind_kt = row["wind_speed_kt"]
+        elapsed_min = int(row["elapsed_min"])
+        is_fault_active = (fault_type is not None and elapsed_min >= fault_start_min)
 
-        rpm = RPM_TARGET.get(phase, 3000) + rng.normal(0, 30)
+        # Baseline RPM with phase targets
+        base_rpm = RPM_TARGET.get(phase, 3000)
+        rpm_noise_std = 25.0
+        if is_fault_active and fault_type == "combustion_instability":
+            rpm_noise_std = 65.0  # cyclic combustion torque flutter
+        elif is_fault_active and fault_type == "misfire":
+            rpm_noise_std = 38.0
+
+        rpm = base_rpm + rng.normal(0, rpm_noise_std)
         power_fraction = POWER_FRACTION.get(phase, 0.3)
 
-        # --- Section 1: combustion / AFR ---
+        # --- Section 1: Combustion Thermodynamics & Dynamic Charge Temp ---
         map_pa = compute_map_pa(altitude_ft, pressure_hpa, power_fraction)
-        t_airbox_k = (oat_c + 273.15) + 25 * power_fraction  # turbo compression heating, ASSUMED
-        m_dot_a = compute_air_mass_flow(map_pa, rpm, t_airbox_k)
+        t_airbox_k = (oat_c + 273.15) + 25 * power_fraction  # turbo compression heating
+        cht_k = cht_c + 273.15
+        m_dot_a = compute_air_mass_flow(map_pa, rpm, t_airbox_k, cht_k=cht_k)
 
         afr_target = AFR_TARGET.get(phase, 13.0)
         m_dot_f = m_dot_a / afr_target
-        rho_fuel = compute_fuel_density(oat_c)  # fuel temp approximated as OAT
-        q_fuel_lps = (m_dot_f / rho_fuel) * 1000.0  # back out volumetric flow, L/s
 
-        afr_actual, phi = compute_afr_phi(m_dot_a, m_dot_f)
+        # Dual carburetor bank fuel delivery (Bank 1: Cyl 1 & 3; Bank 2: Cyl 2 & 4)
+        m_dot_f_b1 = m_dot_f * 0.5
+        m_dot_f_b2 = m_dot_f * 0.5
+        if is_fault_active and fault_type == "injector_abnormalities":
+            # Bank 1 metering restriction / float valve starvation
+            m_dot_f_b1 *= 0.72
+            m_dot_f_b2 *= 1.05
+
+        m_dot_f_total = m_dot_f_b1 + m_dot_f_b2
+        rho_fuel = compute_fuel_density(oat_c)  # ASTM D1250 exponential model
+        q_fuel_lps = (m_dot_f_total / rho_fuel) * 1000.0
+
+        afr_actual, phi = compute_afr_phi(m_dot_a, m_dot_f_total)
         egt_avg = compute_egt(phi, power_fraction)
 
-        # --- Section 2: CHT (integrate ODE), with optional cooling-degradation fault ---
+        # --- Section 2: CHT (Lumped capacitance ODE) ---
         wind_effective = wind_kt
-        if fault_type == "cooling_degradation" and row["elapsed_min"] > n * 0.4:
-            wind_effective = wind_kt * 0.35  # simulate blocked fins / coolant fault
-        cht_c = step_cht(cht_c, oat_c, m_dot_f, DT_S, wind_effective, air_density)
+        if is_fault_active and fault_type == "cooling_degradation":
+            wind_effective = wind_kt * 0.32  # radiator restriction / coolant loss
+        cht_c = step_cht(cht_c, oat_c, m_dot_f_total, DT_S, wind_effective, air_density)
         delta_cht_ambient = cht_c - oat_c
 
-        # --- Oil temp lag ---
+        # --- Oil Temp Lag ---
         oil_temp_c = step_oil_temp(oil_temp_c, cht_c, oat_c, DT_S)
 
-        # --- Section 3: lubrication ---
-        mu = vogel_viscosity(oil_temp_c)
+        # --- Section 3: Lubrication & VFT Viscosity ---
+        mu = vft_viscosity(oil_temp_c)
         p_oil_pa = hagen_poiseuille_oil_pressure(mu, rpm)
-        if fault_type == "lubrication_degradation" and row["elapsed_min"] > n * 0.3:
-            p_oil_pa *= 0.55  # simulate pump wear / leak
+        if is_fault_active and fault_type == "lubrication_issues":
+            p_oil_pa *= 0.52  # pressure regulator / pump bypass leakage
         ratio_lube = p_oil_pa / mu
 
-        # --- Section 4: vibration ---
-        f0, f_cam, f_fire, f_gear = vibration_frequencies(rpm)
+        # --- Section 4: Vibration FFT & Order Tracking Amplitudes ---
+        active_vib_fault = fault_type if is_fault_active else None
+        vib_data = compute_vibration_orders(
+            rpm, power_fraction=power_fraction, fault_type=active_vib_fault, rng=rng
+        )
 
-        # --- Section 5: ML diagnostic features ---
-        misfire_fault_active = (fault_type == "misfire" and row["elapsed_min"] > n * 0.5)
-        cyl_egts, delta_egt_cross = cylinder_egt_spread(egt_avg, rng, fault_mode=misfire_fault_active)
+        # --- Section 5: ML Diagnostic Features & Cylinder Spreads ---
+        misfire_active = (is_fault_active and fault_type == "misfire")
+        cyl_egts, delta_egt_cross = cylinder_egt_spread(egt_avg, rng, fault_mode=misfire_active)
+
+        if is_fault_active and fault_type == "injector_abnormalities":
+            # Bank 1 (cyl 1 & 3) runs lean (higher EGT), Bank 2 (cyl 2 & 4) runs nominal
+            cyl_egts[0] += rng.uniform(40, 65)
+            cyl_egts[2] += rng.uniform(35, 60)
+            delta_egt_cross = float(np.max(cyl_egts) - np.min(cyl_egts))
+
+        # Sensor drift injection: true physical state is unaffected, but measured CHT drifts
+        measured_cht = cht_c
+        if is_fault_active and fault_type == "sensor_drift":
+            drift_minutes = elapsed_min - fault_start_min
+            measured_cht = cht_c + min(0.35 * drift_minutes, 35.0)
+
+        # Health Index update
         health_index = health_index_step(
             health_index, p_oil_pa, P_OIL_NOMINAL_PA, oil_temp_c, T_OIL_NOM_C, DT_S, K_WEAR
         )
@@ -108,12 +161,14 @@ def simulate_mission(df_mission, rng):
         rows.append({
             "mission_id": mission_id,
             "timestamp": row["timestamp"],
-            "elapsed_min": row["elapsed_min"],
+            "elapsed_min": elapsed_min,
             "mission_phase": phase,
             "RPM": round(rpm, 1),
             "MAP_hPa": round(map_pa / 100.0, 2),
             "m_dot_a_kg_s": round(m_dot_a, 5),
-            "m_dot_f_kg_s": round(m_dot_f, 6),
+            "m_dot_f_kg_s": round(m_dot_f_total, 6),
+            "m_dot_f_bank1_kg_s": round(m_dot_f_b1, 6),
+            "m_dot_f_bank2_kg_s": round(m_dot_f_b2, 6),
             "Q_fuel_L_s": round(q_fuel_lps, 5),
             "AFR_actual": round(afr_actual, 3),
             "phi_equivalence_ratio": round(phi, 3),
@@ -123,22 +178,23 @@ def simulate_mission(df_mission, rng):
             "EGT_cyl3_C": round(cyl_egts[2], 1),
             "EGT_cyl4_C": round(cyl_egts[3], 1),
             "Delta_EGT_cross_C": round(delta_egt_cross, 1),
-            "CHT_C": round(cht_c, 2),
-            "Delta_CHT_ambient_C": round(delta_cht_ambient, 2),
+            "CHT_C": round(measured_cht, 2),
+            "Delta_CHT_ambient_C": round(measured_cht - oat_c, 2),
             "Oil_Temp_C": round(oil_temp_c, 2),
             "Oil_Pressure_bar": round(p_oil_pa / 1e5, 3),
             "Oil_Viscosity_Pa_s": round(mu, 6),
             "Ratio_Lube": round(ratio_lube, 2),
-            "Vib_f0_Hz": round(f0, 2),
-            "Vib_fcam_Hz": round(f_cam, 2),
-            "Vib_ffire_Hz": round(f_fire, 2),
-            "Vib_fgear_Hz": round(f_gear, 2),
+            "H_lube": round(ratio_lube, 2),
+            "Vib_f0_Hz": vib_data["f0_Hz"],
+            "Vib_fcam_Hz": vib_data["f_cam_Hz"],
+            "Vib_ffire_Hz": vib_data["f_fire_Hz"],
+            "Vib_fgear_Hz": vib_data["f_gear_Hz"],
+            "Vib_Amp_Total_g": vib_data["Vib_Amp_Total_g"],
+            "Vib_Amp_f0_g": vib_data["Vib_Amp_f0_g"],
+            "Vib_Amp_fcam_g": vib_data["Vib_Amp_fcam_g"],
+            "Vib_Amp_ffire_g": vib_data["Vib_Amp_ffire_g"],
             "Health_Index": round(health_index, 5),
-            "injected_fault_type": fault_type if (
-                fault_type and row["elapsed_min"] > n * (0.3 if fault_type == "lubrication_degradation"
-                                                            else 0.4 if fault_type == "cooling_degradation"
-                                                            else 0.5)
-            ) else "none",
+            "injected_fault_type": fault_type if is_fault_active else "none",
         })
 
     return pd.DataFrame(rows)
@@ -163,6 +219,11 @@ if __name__ == "__main__":
     engine_full["Rate_of_Rise_CHT_C_per_min"] = (
         engine_full.groupby("mission_id")["CHT_C"].diff().fillna(0)
     ).round(3)
+
+    # Rolling RPM instability standard deviation (Section 5 / Fault 6 & 1)
+    engine_full["RPM_instability_std"] = (
+        engine_full.groupby("mission_id")["RPM"].rolling(5, min_periods=1).std().fillna(15.0).reset_index(0, drop=True)
+    ).round(2)
 
     out_path = os.path.join(current_dir, "engine_telemetry.csv")
     engine_full.to_csv(out_path, index=False)
