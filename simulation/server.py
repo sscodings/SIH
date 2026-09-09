@@ -221,26 +221,41 @@ class EngineSimulationService:
         logger.info("Engine simulation reset to cold/idle state.")
 
     def inject_fault(self, cmd: FaultInjectionCommand) -> Dict[str, Any]:
+        kind_map = {
+            "lubrication_issue": "lubrication_issues",
+            "lubrication_issues": "lubrication_issues",
+            "injector_abnormal": "injector_abnormalities",
+            "injector_abnormalities": "injector_abnormalities",
+            "overheating_trend": "overheating_trends",
+            "overheating_trends": "overheating_trends",
+        }
+        normalized_kind = kind_map.get(cmd.kind, cmd.kind)
         start_time = self.t + cmd.start_in_s
+        target_cyl = cmd.cylinder if cmd.cylinder is not None else 0
+
+        if normalized_kind == "sensor_drift":
+            self.sensor_noise.set_sensor_bias(f"cht_{target_cyl + 1}", 45.0)
+
         self.faults.add(
-            kind=cmd.kind,
+            kind=normalized_kind,
             start_t=start_time,
             severity=cmd.severity,
-            cylinder=cmd.cylinder,
-            ramp_s=cmd.ramp_s,
+            cylinder=target_cyl,
+            ramp_s=min(cmd.ramp_s, 2.0),
             **cmd.extra
         )
         record = {
             "id": len(self.fault_records) + 1,
-            "kind": cmd.kind,
+            "kind": normalized_kind,
             "start_t": round(start_time, 2),
             "severity": cmd.severity,
-            "cylinder": cmd.cylinder,
+            "cylinder": target_cyl,
             "ramp_s": cmd.ramp_s,
             "extra": cmd.extra,
             "injected_at_sim_t": round(self.t, 2)
         }
         self.fault_records.append(record)
+        self.last_ml_eval_time = 0.0
         logger.info(f"Injected fault: {record}")
         return record
 
@@ -249,6 +264,11 @@ class EngineSimulationService:
         self.fault_records.clear()
         self.sensor_noise.clear_sensor_biases()
         self.twin.faults = self.faults
+        self.last_ml_eval_time = 0.0
+        self.cached_layer2_pred = "none"
+        self.cached_layer2_conf = 1.0
+        self.cached_layer3_anom = False
+        self.cached_layer3_recon = 0.0
         logger.info("Cleared all injected faults.")
 
     def _diagnose_snapshot(self, out: Dict[str, Any], telemetry: Dict[str, Any]) -> Dict[str, Any]:
@@ -276,63 +296,76 @@ class EngineSimulationService:
         }
         self.telemetry_buffer.append(buf_item)
 
-        # Layer 1: Physics-informed rule check (existing logic, preserved as-is)
+        # Compute derived features from buffer and physics outputs
+        recent_egts = [b["delta_egt"] for b in list(self.telemetry_buffer)[-3:]]
+        delta_egt_roll3 = float(np.mean(recent_egts)) if recent_egts else delta_egt_current
+
+        recent_rpms = [b["rpm"] for b in list(self.telemetry_buffer)[-5:]]
+        rpm_instability_std = float(np.std(recent_rpms)) if len(recent_rpms) >= 2 else 15.0
+
+        if len(self.telemetry_buffer) >= 2:
+            dt_s = self.telemetry_buffer[-1]["t"] - self.telemetry_buffer[0]["t"]
+            d_cht = self.telemetry_buffer[-1]["cht"] - self.telemetry_buffer[0]["cht"]
+            rate_of_rise_cht = float((d_cht / (dt_s / 60.0))) if dt_s > 0.05 else 0.0
+        else:
+            rate_of_rise_cht = 0.0
+
+        # Hagen-Poiseuille lubrication ratio
+        oil_leak_factor = out.get("fault_state", {}).get("oil_leak_factor", 1.0)
+        p_oil_ratio = float(np.clip(oil_leak_factor, 0.2, 1.0))
+
+        # Fuel bank mismatch
+        m_dot_f_cyl = out.get("m_dot_f_cyl")
+        if m_dot_f_cyl is not None and len(m_dot_f_cyl) == 4:
+            b1 = float(m_dot_f_cyl[0] + m_dot_f_cyl[2])
+            b2 = float(m_dot_f_cyl[1] + m_dot_f_cyl[3])
+            bank_mismatch = float(abs(b1 - b2) / max(b1 + b2, 1e-7))
+        else:
+            b1 = float(telemetry["fuel_flow_kg_s"] * 0.5)
+            b2 = float(telemetry["fuel_flow_kg_s"] * 0.5)
+            bank_mismatch = 0.0
+
+        # Vibration harmonic features
+        vib = out.get("vibration", {})
+        v_f0 = float(vib.get("amp_1x_g", 0.05))
+        v_fcam = float(vib.get("amp_cam_g", 0.03))
+        v_ffire = float(vib.get("amp_fire_g", 0.08))
+        v_total = float(vib.get("rms_g", telemetry.get("vibration_rms_g", 0.8)))
+        f0_clip = max(v_f0, 0.05)
+
+        # Layer 1: Physics-informed rule check (fully populated with derived physics metrics)
         row_s = pd.Series({
-            "RPM": telemetry["rpm"],
-            "Oil_Pressure_bar": telemetry["oil_pressure_bar"],
-            "Oil_Viscosity_Pa_s": mu,
-            "CHT_C": max_cht_current,
-            "Delta_CHT_ambient_C": max_cht_current - telemetry["ambient_c"],
-            "EGT_cyl1_C": telemetry["egt_c"][0],
-            "EGT_cyl2_C": telemetry["egt_c"][1],
-            "EGT_cyl3_C": telemetry["egt_c"][2],
-            "EGT_cyl4_C": telemetry["egt_c"][3],
-            "Delta_EGT_cross_C": delta_egt_current,
+            "RPM": float(telemetry["rpm"]),
+            "Oil_Pressure_bar": float(telemetry["oil_pressure_bar"]),
+            "Oil_Viscosity_Pa_s": float(mu),
+            "CHT_C": float(max_cht_current),
+            "Delta_CHT_ambient_C": float(max_cht_current - telemetry["ambient_c"]),
+            "EGT_cyl1_C": float(telemetry["egt_c"][0]),
+            "EGT_cyl2_C": float(telemetry["egt_c"][1]),
+            "EGT_cyl3_C": float(telemetry["egt_c"][2]),
+            "EGT_cyl4_C": float(telemetry["egt_c"][3]),
+            "Delta_EGT_cross_C": float(delta_egt_current),
+            "Delta_EGT_cross_roll3": float(delta_egt_roll3),
+            "P_oil_residual_ratio": float(p_oil_ratio),
+            "m_dot_f_bank1_kg_s": float(b1),
+            "m_dot_f_bank2_kg_s": float(b2),
+            "Bank_Fuel_Mismatch_ratio": float(bank_mismatch),
+            "Vib_Amp_Total_g": float(v_total),
+            "Vib_Amp_f0_g": float(v_f0),
+            "Vib_Amp_fcam_g": float(v_fcam),
+            "Vib_Amp_ffire_g": float(v_ffire),
+            "RPM_instability_std": float(rpm_instability_std),
+            "Rate_of_Rise_CHT_C_per_min": float(rate_of_rise_cht),
             "mission_phase": "Cruise_Loiter",
-            "Health_Index": self.health_index,
+            "Health_Index": float(self.health_index),
         })
         diag = self.rule_engine.diagnose_row(row_s)
 
-        # Layers 2 & 3: Run once per second (every 1.0s) to guarantee < 100ms latency (Step A4)
+        # Layers 2 & 3: Run once per second (every 1.0s) or immediately upon fault injection
         now = time.perf_counter()
         if (now - self.last_ml_eval_time >= 1.0) and self.classifier is not None and self.autoencoder is not None:
             t_start_diag = time.perf_counter()
             try:
-                # Rolling features from buffer
-                recent_egts = [b["delta_egt"] for b in list(self.telemetry_buffer)[-3:]]
-                delta_egt_roll3 = float(np.mean(recent_egts)) if recent_egts else delta_egt_current
-
-                recent_rpms = [b["rpm"] for b in list(self.telemetry_buffer)[-5:]]
-                rpm_instability_std = float(np.std(recent_rpms)) if len(recent_rpms) >= 2 else 15.0
-
-                if len(self.telemetry_buffer) >= 2:
-                    dt_s = self.telemetry_buffer[-1]["t"] - self.telemetry_buffer[0]["t"]
-                    d_cht = self.telemetry_buffer[-1]["cht"] - self.telemetry_buffer[0]["cht"]
-                    rate_of_rise_cht = float((d_cht / (dt_s / 60.0))) if dt_s > 0.05 else 0.0
-                else:
-                    rate_of_rise_cht = 0.0
-
-                # Hagen-Poiseuille lubrication ratio (1.0 nominal, drops to ~0.4-0.5 under lubrication fault)
-                oil_leak_factor = out.get("fault_state", {}).get("oil_leak_factor", 1.0)
-                p_oil_ratio = float(np.clip(oil_leak_factor, 0.2, 1.0))
-
-                # Fuel bank mismatch
-                m_dot_f_cyl = out.get("m_dot_f_cyl")
-                if m_dot_f_cyl is not None and len(m_dot_f_cyl) == 4:
-                    b1 = m_dot_f_cyl[0] + m_dot_f_cyl[2]
-                    b2 = m_dot_f_cyl[1] + m_dot_f_cyl[3]
-                    bank_mismatch = float(abs(b1 - b2) / max(b1 + b2, 1e-7))
-                else:
-                    bank_mismatch = 0.0
-
-                # Vibration harmonic features
-                vib = out.get("vibration", {})
-                v_f0 = float(vib.get("amp_1x_g", 0.05))
-                v_fcam = float(vib.get("amp_cam_g", 0.03))
-                v_ffire = float(vib.get("amp_fire_g", 0.08))
-                v_total = float(vib.get("rms_g", telemetry.get("vibration_rms_g", 0.8)))
-                f0_clip = max(v_f0, 0.05)
-
                 # Assemble 26 ML features
                 features_dict = {
                     "RPM": float(telemetry["rpm"]),
