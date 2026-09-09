@@ -18,11 +18,12 @@ export function TopBar({ activeTab, setActiveTab, telemetry }) {
   }, []);
 
   const tabs = [
-    { id: 'simulation', num: '1', label: '1. SIMULATION' },
-    { id: 'livestats', num: '2', label: '2. LIVE STATS' },
-    { id: 'livestats_graph', num: '3', label: '3. LIVE STATS & GRAPH' },
-    { id: 'ideal_real', num: '4', label: '4. IDEAL VS REAL' },
-    { id: 'health_summary', num: '5', label: '5. HEALTH SUMMARY' },
+    { id: 'engine_3d_simulation', num: '1', label: '1. 3D DIGITAL TWIN' },
+    { id: 'simulation', num: '2', label: '2. UAV SCHEMATIC' },
+    { id: 'livestats', num: '3', label: '3. LIVE STATS' },
+    { id: 'livestats_graph', num: '4', label: '4. LIVE STATS & GRAPH' },
+    { id: 'ideal_real', num: '5', label: '5. IDEAL VS REAL' },
+    { id: 'health_summary', num: '6', label: '6. HEALTH SUMMARY' },
   ];
 
   return (
@@ -32,7 +33,8 @@ export function TopBar({ activeTab, setActiveTab, telemetry }) {
         <div className="uav-sys-brand">
           <span className="uav-dot-pulse" />
           <span>
-            {activeTab === 'livestats' ? 'SYS_STATUS: ONLINE  |  UAV-914 ROTAX TURBO' :
+            {activeTab === 'engine_3d_simulation' ? 'SYS.DIGITAL_TWIN // ROTAX 914F 3D MODEL' :
+             activeTab === 'livestats' ? 'SYS_STATUS: ONLINE  |  UAV-914 ROTAX TURBO' :
              activeTab === 'livestats_graph' ? 'SYS-UAV // TELEMETRY MONITOR' :
              activeTab === 'ideal_real' ? 'UAV PROPULSION TELEMETRY SUITE // ARCHITECTURE 04' :
              'SYS.TELEMETRY // UAV-914F'}
@@ -87,7 +89,7 @@ export function TopBar({ activeTab, setActiveTab, telemetry }) {
 
       {/* Row 2: Subtitle Metadata / Hardware Bus Links */}
       <div className="uav-topbar-meta">
-        {activeTab === 'simulation' && (
+        {(activeTab === 'simulation' || activeTab === 'engine_3d_simulation') && (
           <>
             <div className="uav-meta-group">
               <span className="uav-meta-item">AIRFRAME: <span className="uav-meta-val">TACTICAL MALE SURVEILLANCE</span></span>

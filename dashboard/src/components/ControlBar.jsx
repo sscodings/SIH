@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 
 export function ControlBar({ telemetry, isConnected, sendCommand }) {
   const [selectedFault, setSelectedFault] = useState('misfire');
-  const isRunning = telemetry?.is_running ?? true;
+  const isRunning = telemetry?.is_running ?? false;
   const activeFaultsCount = telemetry?.active_faults_count ?? 0;
 
   const handleStart = () => {

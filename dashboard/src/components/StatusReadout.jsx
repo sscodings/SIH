@@ -117,6 +117,15 @@ export function StatusReadout({ telemetry }) {
           </div>
           <div className="telemetry-sub">Vib: {vib}g</div>
         </div>
+
+        <div className="telemetry-card" style={{ gridColumn: 'span 2' }}>
+          <div className="telemetry-label">Ambient Air Temperature</div>
+          <div className="telemetry-val-box">
+            <span className="telemetry-val">{telemetry?.ambient_c !== undefined ? Number(telemetry.ambient_c).toFixed(1) : '15.0'}</span>
+            <span className="telemetry-unit">°C</span>
+          </div>
+          <div className="telemetry-sub">ISA Standard Atmosphere Model</div>
+        </div>
       </div>
     </div>
   );

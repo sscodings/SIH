@@ -312,35 +312,37 @@ class FaultInjector:
                 state["extra_vibration"] += 0.6 * s
                 state["rpm_instability"] += 0.5 * s
 
-            elif ev.kind == "injector_abnormal":
-                direction = ev.extra.get("direction", "lean")
-                bias = (2.0 if direction == "rich" else -2.0) * s
-                state["afr_bias"][idx] += bias
+            elif ev.kind in ["injector_abnormal", "injector_abnormalities"]:
+                bias = 4.0 * s
+                state["afr_bias"][0] += bias
+                state["afr_bias"][2] += bias
+                state["afr_bias"][1] -= bias * 0.3
+                state["afr_bias"][3] -= bias * 0.3
 
             elif ev.kind == "cooling_degradation":
-                state["cooling_factor"] *= (1.0 - 0.6 * s)
+                state["cooling_factor"] *= (1.0 - 0.65 * s)
 
-            elif ev.kind == "lubrication_issue":
-                state["oil_leak_factor"] *= (1.0 - 0.7 * s)
+            elif ev.kind in ["lubrication_issue", "lubrication_issues"]:
+                state["oil_leak_factor"] *= (1.0 - 0.56 * s)
                 state["oil_cooling_factor"] *= (1.0 - 0.3 * s)
 
             elif ev.kind == "sensor_drift":
                 sensor = ev.extra.get("sensor", f"CHT_{idx + 1}")
-                rate = ev.extra.get("drift_per_s", 0.05)
+                rate = ev.extra.get("drift_per_s", 1.0)
                 state["sensor_drift"][sensor] = (
-                    state["sensor_drift"].get(sensor, 0.0) + rate * (t - ev.start_t) * s
+                    state["sensor_drift"].get(sensor, 0.0) + (35.0 + rate * (t - ev.start_t)) * s
                 )
 
             elif ev.kind == "combustion_instability":
                 state["rpm_instability"] += 0.8 * s
-                state["extra_vibration"] += 0.4 * s
+                state["extra_vibration"] += 0.5 * s
 
-            elif ev.kind == "overheating_trend":
-                state["cooling_factor"] *= (1.0 - 0.4 * s)
-                state["oil_cooling_factor"] *= (1.0 - 0.3 * s)
+            elif ev.kind in ["overheating_trend", "overheating_trends"]:
+                state["cooling_factor"] *= (1.0 - 0.45 * s)
+                state["oil_cooling_factor"] *= (1.0 - 0.4 * s)
 
             elif ev.kind == "abnormal_vibration":
-                state["unbalance_extra"] += 0.8 * s
+                state["unbalance_extra"] += 2.2 * s
 
             elif ev.kind == "regulator_failure":
                 state["regulator_failure"] = True
@@ -459,7 +461,9 @@ class RotaxDigitalTwin:
             rpm=rpm, cht_c=cht.copy(), delta_cht_ambient=delta_cht_ambient,
             egt_c=egt_cyl, oil_temp_c=t_oil,
             oil_pressure_pa=p_oil, ratio_lube=ratio_lube,
-            fuel_flow_kg_s=float(np.sum(m_dot_f_cyl)), afr_cyl=afr_cyl, phi_cyl=phi_cyl,
+            fuel_flow_kg_s=float(np.sum(m_dot_f_cyl)), m_dot_f_cyl=m_dot_f_cyl.copy(),
+            m_dot_a_kg_s=float(m_dot_a_total),
+            afr_cyl=afr_cyl, phi_cyl=phi_cyl,
             alternator_v=v_alt,
             torque_indicated_nm=torque_indicated, torque_friction_nm=torque_friction,
             torque_load_nm=torque_load,

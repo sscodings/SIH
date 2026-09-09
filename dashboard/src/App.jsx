@@ -12,7 +12,7 @@ import { ScreenEngine3DSimulation } from './components/ScreenEngine3DSimulation'
 import './index.css';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('simulation');
+  const [activeTab, setActiveTab] = useState('engine_3d_simulation');
   const [telemetry, setTelemetry] = useState(INITIAL_TELEMETRY);
 
   // Connect to live WebSocket stream if backend is online
@@ -32,6 +32,7 @@ export default function App() {
 
         return {
           ...prev,
+          ...wsLiveTelemetry,
           rpm: liveRpm,
           cht: liveCht,
           egt: liveEgt,
@@ -39,6 +40,13 @@ export default function App() {
           oilTempC: liveOilT,
           fuelFlowLh: liveFuelLh,
           vibrationRmsG: liveVib,
+          altitude_m: wsLiveTelemetry.altitude_m !== undefined ? wsLiveTelemetry.altitude_m : prev.altitude_m,
+          alternator_v: wsLiveTelemetry.alternator_v !== undefined ? wsLiveTelemetry.alternator_v : prev.alternator_v,
+          active_faults: wsLiveTelemetry.active_faults || prev.active_faults || [],
+          active_faults_count: wsLiveTelemetry.active_faults_count ?? (wsLiveTelemetry.active_faults?.length || 0),
+          diagnostics: wsLiveTelemetry.diagnostics || prev.diagnostics,
+          cht_c: wsLiveTelemetry.cht_c || prev.cht_c || [liveCht, liveCht, liveCht, liveCht],
+          egt_c: wsLiveTelemetry.egt_c || prev.egt_c || [liveEgt, liveEgt, liveEgt, liveEgt],
           s2: {
             ...prev.s2,
             rpm: liveRpm,
@@ -54,15 +62,16 @@ export default function App() {
     }
   }, [wsLiveTelemetry, isConnected]);
 
-  // Keyboard Navigation: 1-5 keys for mission control tab switching
+  // Keyboard Navigation: 1-6 keys for mission control tab switching
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
-      if (e.key === '1') setActiveTab('simulation');
-      if (e.key === '2') setActiveTab('livestats');
-      if (e.key === '3') setActiveTab('livestats_graph');
-      if (e.key === '4') setActiveTab('ideal_real');
-      if (e.key === '5') setActiveTab('health_summary');
+      if (e.key === '1') setActiveTab('engine_3d_simulation');
+      if (e.key === '2') setActiveTab('simulation');
+      if (e.key === '3') setActiveTab('livestats');
+      if (e.key === '4') setActiveTab('livestats_graph');
+      if (e.key === '5') setActiveTab('ideal_real');
+      if (e.key === '6') setActiveTab('health_summary');
       if (e.key === 'Escape' && activeTab === 'engine_3d_simulation') setActiveTab('simulation');
     };
 
@@ -75,20 +84,13 @@ export default function App() {
       <div className="uav-app-container">
         {/* Persistent Top Navigation Bar */}
         <TopBar
-          activeTab={activeTab === 'engine_3d_simulation' ? 'simulation' : activeTab}
+          activeTab={activeTab}
           setActiveTab={setActiveTab}
           telemetry={telemetry}
         />
 
         {/* Main Tab Screen Viewport */}
         <main className="uav-main-viewport">
-          {activeTab === 'simulation' && (
-            <ScreenSimulation
-              telemetry={telemetry}
-              onOpenSimulation={() => setActiveTab('engine_3d_simulation')}
-            />
-          )}
-
           {activeTab === 'engine_3d_simulation' && (
             <ScreenEngine3DSimulation
               telemetry={telemetry}
@@ -96,6 +98,13 @@ export default function App() {
               isConnected={isConnected}
               sendCommand={sendCommand}
               onBack={() => setActiveTab('simulation')}
+            />
+          )}
+
+          {activeTab === 'simulation' && (
+            <ScreenSimulation
+              telemetry={telemetry}
+              onOpenSimulation={() => setActiveTab('engine_3d_simulation')}
             />
           )}
 
@@ -118,7 +127,7 @@ export default function App() {
 
         {/* Persistent Tactical Footer Bar */}
         <FooterBar
-          activeTab={activeTab === 'engine_3d_simulation' ? 'simulation' : activeTab}
+          activeTab={activeTab}
           telemetry={telemetry}
         />
       </div>

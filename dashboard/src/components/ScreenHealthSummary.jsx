@@ -2,7 +2,10 @@ import React from 'react';
 
 export function ScreenHealthSummary({ telemetry }) {
   const s5 = telemetry.s5 || {};
-  const score = s5.healthScore || 92.4;
+  const liveHealth = telemetry?.health_index !== undefined ? (telemetry.health_index * 100) : (s5.healthScore || 100.0);
+  const score = Number(liveHealth.toFixed(1));
+  const activeFaults = telemetry?.active_faults || [];
+  const hasFault = activeFaults.length > 0 || Boolean(telemetry?.diagnostics?.ml_diagnostics?.anomaly_detected);
 
   // SVG Circular Gauge Arc Math
   const radius = 100;
@@ -38,19 +41,19 @@ export function ScreenHealthSummary({ telemetry }) {
             strokeDasharray="4,4"
           />
 
-          {/* Foreground Active Orange Arc */}
+          {/* Foreground Active Arc */}
           <circle
             cx="120"
             cy="120"
             r={radius}
             fill="none"
-            stroke="#f59e0b"
+            stroke={score < 80 ? '#ef4444' : score < 95 ? '#f59e0b' : '#10b981'}
             strokeWidth={strokeWidth}
             strokeDasharray={circumference}
             strokeDashoffset={strokeDashoffset}
             strokeLinecap="round"
             style={{
-              filter: 'drop-shadow(0 0 8px rgba(245, 158, 11, 0.6))',
+              filter: `drop-shadow(0 0 8px ${score < 80 ? 'rgba(239, 68, 68, 0.6)' : score < 95 ? 'rgba(245, 158, 11, 0.6)' : 'rgba(16, 185, 129, 0.6)'})`,
               transition: 'stroke-dashoffset 0.8s ease'
             }}
           />
@@ -62,30 +65,34 @@ export function ScreenHealthSummary({ telemetry }) {
             {score}<span className="s5-gauge-percent-unit">%</span>
           </div>
           <div className="s5-gauge-caption">
-            OVERALL ENGINE HEALTH SCORE
+            OVERALL ENGINE HEALTH SCORE (RUL PROXY)
           </div>
         </div>
       </div>
 
       {/* Active Anomaly Pill */}
       <div className="s5-anomaly-pill">
-        <span className="uav-dot-orange" />
-        <span>1 ACTIVE ANOMALY DETECTED</span>
+        <span className={hasFault ? 'uav-dot-orange' : 'uav-dot-green'} />
+        <span>
+          {hasFault
+            ? (activeFaults.length > 0 ? `${activeFaults.length} ACTIVE FAULT(S): ${activeFaults.join(', ').toUpperCase()}` : 'ACTIVE ANOMALY DETECTED')
+            : 'ALL SUBSYSTEMS NOMINAL (0 ACTIVE FAULTS)'}
+        </span>
       </div>
 
       {/* 3-Column Statistical Summary */}
       <div className="s5-three-col-stats">
         <div className="s5-stat-block">
           <span className="s5-stat-lbl">IDEAL BASELINE</span>
-          <span className="s5-stat-val">{s5.idealBaseline || "100.0%"}</span>
+          <span className="s5-stat-val">100.0%</span>
         </div>
         <div className="s5-stat-block">
           <span className="s5-stat-lbl">REAL COMPLIANCE</span>
-          <span className="s5-stat-val orange">{s5.realCompliance || "92.4%"}</span>
+          <span className={`s5-stat-val ${score < 95 ? 'orange' : 'green'}`}>{score}%</span>
         </div>
         <div className="s5-stat-block">
           <span className="s5-stat-lbl">DELTA VARIANCE</span>
-          <span className="s5-stat-val">{s5.deltaVariance || "-7.6%"}</span>
+          <span className="s5-stat-val">{(score - 100.0).toFixed(1)}%</span>
         </div>
       </div>
 

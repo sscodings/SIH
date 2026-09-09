@@ -1486,6 +1486,44 @@ html, body {
   overflow: hidden;
 }
 
+.engine-viewport-container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.viewport-hud-badge {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: rgba(6, 7, 9, 0.75);
+  border: 1px solid var(--border-hairline);
+  padding: 5px 10px;
+  border-radius: 3px;
+  pointer-events: none;
+}
+
+.viewport-instructions {
+  position: absolute;
+  bottom: 14px;
+  left: 14px;
+  z-index: 10;
+  font-size: 10px;
+  color: var(--text-muted);
+  background: rgba(6, 7, 9, 0.75);
+  border: 1px solid var(--border-hairline);
+  padding: 4px 10px;
+  border-radius: 3px;
+  pointer-events: none;
+}
+
 .s-3d-viewport-overlay {
   position: absolute;
   top: 12px;
@@ -1634,4 +1672,177 @@ html, body {
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.25);
 }
+
+/* ==========================================================================
+   Configurable Simulation Control Panel & Tactical Stepper Styles
+   ========================================================================== */
+
+.s-3d-sim-control-panel {
+  background: rgba(10, 14, 22, 0.95);
+  border: 1px solid rgba(0, 229, 255, 0.2);
+  border-radius: 4px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+.sim-ctrl-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.sim-ctrl-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sim-ctrl-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+}
+
+.sim-pill-btn {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.sim-pill-btn:hover {
+  border-color: var(--accent-cyan);
+  color: #fff;
+  background: rgba(0, 229, 255, 0.08);
+}
+
+.sim-pill-btn.active {
+  background: rgba(0, 229, 255, 0.2);
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+  box-shadow: 0 0 10px rgba(0, 229, 255, 0.25);
+}
+
+/* 7-Stage Pipeline Breadcrumb Stepper */
+.ml-pipeline-stepper {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  padding: 4px 0;
+  margin-bottom: 8px;
+}
+
+.ml-stepper-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 7px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  white-space: nowrap;
+  transition: all 0.2s ease;
+}
+
+.ml-stepper-item.completed {
+  color: var(--text-secondary);
+  border-color: rgba(46, 230, 166, 0.25);
+  background: rgba(46, 230, 166, 0.04);
+}
+
+.ml-stepper-item.active {
+  color: #ffffff;
+  border-color: var(--accent-cyan);
+  background: rgba(0, 229, 255, 0.14);
+  box-shadow: 0 0 12px rgba(0, 229, 255, 0.3);
+}
+
+.ml-stepper-item.active.alert {
+  border-color: #ef4444;
+  background: rgba(239, 68, 68, 0.16);
+  box-shadow: 0 0 12px rgba(239, 68, 68, 0.35);
+  color: #ff8888;
+}
+
+.ml-stepper-arrow {
+  color: rgba(255, 255, 255, 0.15);
+  font-size: 10px;
+}
+
+/* RTM Radial/Bar Gauge */
+.rtm-hero-card {
+  background: linear-gradient(135deg, rgba(14, 22, 36, 0.9), rgba(8, 12, 20, 0.95));
+  border: 1px solid rgba(0, 229, 255, 0.25);
+  border-radius: 4px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  position: relative;
+  overflow: hidden;
+}
+
+.rtm-hero-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 4px;
+  height: 100%;
+  background: var(--accent-cyan);
+}
+
+.rtm-hero-card.warning::before {
+  background: var(--status-orange);
+}
+
+.rtm-hero-card.critical::before {
+  background: #ef4444;
+  box-shadow: 0 0 12px rgba(239, 68, 68, 0.6);
+}
+
+/* Secondary Compact Telemetry Grid */
+.s-3d-secondary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+  font-size: 11px;
+}
+
+.s-3d-secondary-item {
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 6px 8px;
+  border-radius: 2px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.s-3d-secondary-item.warning {
+  border-color: rgba(245, 166, 35, 0.4);
+  background: rgba(245, 166, 35, 0.04);
+}
+
+.s-3d-secondary-item.critical {
+  border-color: rgba(239, 68, 68, 0.5);
+  background: rgba(239, 68, 68, 0.08);
+}
+
 
