@@ -14,8 +14,9 @@ const FAULT_PARAM_MAP = {
   sensor_drift: ['cht', 'egt'],
   combustion_instability: ['rpm', 'vibrationRmsG'],
   overheating_trend: ['cht', 'oilTempC'],
-  overheating_trends: ['cht', 'oilTempC'],
   abnormal_vibration: ['vibrationRmsG'],
+  catastrophic_failure: ['rpm', 'oilPressureBar', 'fuelFlowLh', 'vibrationRmsG', 'cht', 'egt', 'oilTempC'],
+  engine_seizure: ['rpm', 'oilPressureBar', 'fuelFlowLh', 'vibrationRmsG', 'cht', 'egt', 'oilTempC'],
 };
 
 /**
@@ -372,7 +373,13 @@ export function ScreenLiveStatsAndGraph({ telemetry }) {
     : [];
   const mlDiag = telemetry?.diagnostics?.ml_diagnostics || {};
   const isFaultDetected = activeFaults.length > 0 || Boolean(mlDiag.anomaly_detected);
-  const detectedFault = (activeFaults[0] || mlDiag.fault_type || 'none').toLowerCase();
+
+  // Safely extract fault name string whether active_faults contains strings or objects { kind: '...' }
+  const rawFirstFault = activeFaults.length > 0 ? activeFaults[0] : null;
+  const faultName = typeof rawFirstFault === 'string'
+    ? rawFirstFault
+    : (rawFirstFault?.kind || mlDiag.fault_type || 'none');
+  const detectedFault = String(faultName || 'none').toLowerCase();
 
   // Determine which specific parameters are affected by the detected fault
   const affectedKeys = isFaultDetected
@@ -390,6 +397,10 @@ export function ScreenLiveStatsAndGraph({ telemetry }) {
     { key: 'vibrationRmsG', num: 7, name: 'RADIAL VIBRATION', sub: 'VIBRATION SIGNATURE (RMS)' },
   ];
 
+  const displayFaultTitle = (detectedFault && detectedFault !== 'none')
+    ? detectedFault.toUpperCase().replace(/_/g, ' ')
+    : 'ANOMALY';
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', width: '100%', paddingBottom: '32px' }}>
       {/* Centered Tactical Title & Status Eyebrow */}
@@ -405,7 +416,7 @@ export function ScreenLiveStatsAndGraph({ telemetry }) {
           <span style={{ color: isFaultDetected ? '#ef4444' : 'var(--status-green)', fontWeight: 700 }}>
             STATUS:{' '}
             {isFaultDetected
-              ? `⚠ FAULT DETECTED: ${(detectedFault || 'ANOMALY').toUpperCase().replace('_', ' ')}`
+              ? `⚠ FAULT DETECTED: ${displayFaultTitle}`
               : 'ALL PARAMETERS NOMINAL'}
           </span>
         </div>

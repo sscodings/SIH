@@ -9,6 +9,7 @@ import { ScreenLiveStatsAndGraph } from './components/ScreenLiveStatsAndGraph';
 import { ScreenIdealVsReal } from './components/ScreenIdealVsReal';
 import { ScreenHealthSummary } from './components/ScreenHealthSummary';
 import { ScreenEngine3DSimulation } from './components/ScreenEngine3DSimulation';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import './index.css';
 
 export default function App() {
@@ -93,38 +94,40 @@ export default function App() {
 
         {/* Main Tab Screen Viewport */}
         <main className="uav-main-viewport">
-          {activeTab === 'engine_3d_simulation' && (
-            <ScreenEngine3DSimulation
-              telemetry={telemetry}
-              wsTelemetry={wsLiveTelemetry}
-              isConnected={isConnected}
-              sendCommand={sendCommand}
-              onBack={() => setActiveTab('simulation')}
-            />
-          )}
+          <ErrorBoundary title={`Screen Error (${activeTab})`}>
+            {activeTab === 'engine_3d_simulation' && (
+              <ScreenEngine3DSimulation
+                telemetry={telemetry}
+                wsTelemetry={wsLiveTelemetry}
+                isConnected={isConnected}
+                sendCommand={sendCommand}
+                onBack={() => setActiveTab('simulation')}
+              />
+            )}
 
-          {activeTab === 'simulation' && (
-            <ScreenSimulation
-              telemetry={telemetry}
-              onOpenSimulation={() => setActiveTab('engine_3d_simulation')}
-            />
-          )}
+            {activeTab === 'simulation' && (
+              <ScreenSimulation
+                telemetry={telemetry}
+                onOpenSimulation={() => setActiveTab('engine_3d_simulation')}
+              />
+            )}
 
-          {activeTab === 'livestats' && (
-            <ScreenLiveStats telemetry={telemetry} />
-          )}
+            {activeTab === 'livestats' && (
+              <ScreenLiveStats telemetry={telemetry} />
+            )}
 
-          {activeTab === 'livestats_graph' && (
-            <ScreenLiveStatsAndGraph telemetry={telemetry} />
-          )}
+            {activeTab === 'livestats_graph' && (
+              <ScreenLiveStatsAndGraph telemetry={telemetry} />
+            )}
 
-          {activeTab === 'ideal_real' && (
-            <ScreenIdealVsReal telemetry={telemetry} />
-          )}
+            {activeTab === 'ideal_real' && (
+              <ScreenIdealVsReal telemetry={telemetry} />
+            )}
 
-          {activeTab === 'health_summary' && (
-            <ScreenHealthSummary telemetry={telemetry} />
-          )}
+            {activeTab === 'health_summary' && (
+              <ScreenHealthSummary telemetry={telemetry} />
+            )}
+          </ErrorBoundary>
         </main>
 
         {/* Persistent Tactical Footer Bar */}

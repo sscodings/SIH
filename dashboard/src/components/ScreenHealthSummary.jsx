@@ -75,7 +75,9 @@ export function ScreenHealthSummary({ telemetry }) {
         <span className={hasFault ? 'uav-dot-orange' : 'uav-dot-green'} />
         <span>
           {hasFault
-            ? (activeFaults.length > 0 ? `${activeFaults.length} ACTIVE FAULT(S): ${activeFaults.join(', ').toUpperCase()}` : 'ACTIVE ANOMALY DETECTED')
+            ? (activeFaults.length > 0 
+                ? `${activeFaults.length} ACTIVE FAULT(S): ${activeFaults.map(f => typeof f === 'string' ? f : (f?.kind || 'fault')).join(', ').toUpperCase().replace(/_/g, ' ')}` 
+                : 'ACTIVE ANOMALY DETECTED')
             : 'ALL SUBSYSTEMS NOMINAL (0 ACTIVE FAULTS)'}
         </span>
       </div>
