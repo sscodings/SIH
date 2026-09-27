@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
+export const API_BASE = 'http://localhost:8000';
 const WS_URL = 'ws://localhost:8000/ws/engine';
 const RECONNECT_DELAY_MS = 2000;
 
@@ -44,6 +45,7 @@ export function useEngineTelemetry() {
       socket.onclose = (event) => {
         if (!isMountedRef.current) return;
         setIsConnected(false);
+        setTelemetry(null);
         console.log(`[useEngineTelemetry] WebSocket closed (code ${event.code}). Reconnecting in ${RECONNECT_DELAY_MS}ms...`);
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = setTimeout(connect, RECONNECT_DELAY_MS);

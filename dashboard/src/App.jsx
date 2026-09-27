@@ -1,80 +1,71 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { INITIAL_TELEMETRY } from './data/telemetryData';
 import { useEngineTelemetry } from './hooks/useEngineTelemetry';
+import { useTelemetryHistory } from './hooks/useTelemetryHistory';
 import { TopBar } from './components/TopBar';
 import { FooterBar } from './components/FooterBar';
 import { ScreenSimulation } from './components/ScreenSimulation';
-import { ScreenLiveStats } from './components/ScreenLiveStats';
 import { ScreenLiveStatsAndGraph } from './components/ScreenLiveStatsAndGraph';
-import { ScreenIdealVsReal } from './components/ScreenIdealVsReal';
 import { ScreenHealthSummary } from './components/ScreenHealthSummary';
 import { ScreenEngine3DSimulation } from './components/ScreenEngine3DSimulation';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { isNum, kgPerSecToLitresPerHour } from './utils/format';
 import './index.css';
+
+const TAB_KEYS = {
+  '1': 'simulation',
+  '2': 'engine_3d_simulation',
+  '3': 'livestats_graph',
+  '4': 'health_summary',
+};
+
+const MAP_MAX_PA = 1.42e5; // turbo boost cap in the physics model
+
+const round = (v, digits) => (isNum(v) ? Number(v.toFixed(digits)) : null);
+const maxOf = (arr) => (Array.isArray(arr) && arr.length && arr.every(isNum) ? Math.max(...arr) : null);
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('simulation');
-  const [telemetry, setTelemetry] = useState(INITIAL_TELEMETRY);
-
-  // Connect to live WebSocket stream if backend is online
   const { telemetry: wsLiveTelemetry, isConnected, sendCommand } = useEngineTelemetry();
 
-  // Synchronize incoming live websocket telemetry into the HUD data store
-  useEffect(() => {
-    if (wsLiveTelemetry && isConnected) {
-      setTelemetry(prev => {
-        const liveRpm = wsLiveTelemetry.rpm !== undefined ? Math.round(wsLiveTelemetry.rpm) : prev.rpm;
-        const liveCht = wsLiveTelemetry.cht_c ? Number(Math.max(...wsLiveTelemetry.cht_c).toFixed(1)) : prev.cht;
-        const liveEgt = wsLiveTelemetry.egt_c ? Number(Math.max(...wsLiveTelemetry.egt_c).toFixed(1)) : prev.egt;
-        const liveOilP = wsLiveTelemetry.oil_pressure_bar !== undefined ? Number(wsLiveTelemetry.oil_pressure_bar.toFixed(1)) : prev.oilPressureBar;
-        const liveOilT = wsLiveTelemetry.oil_temp_c !== undefined ? Number(wsLiveTelemetry.oil_temp_c.toFixed(1)) : prev.oilTempC;
-        const liveVib = wsLiveTelemetry.vibration_rms_g !== undefined ? Number(wsLiveTelemetry.vibration_rms_g.toFixed(2)) : prev.vibrationRmsG;
-        const liveFuelLh = wsLiveTelemetry.fuel_flow_kg_s !== undefined ? Number((wsLiveTelemetry.fuel_flow_kg_s * 3600 / 0.72).toFixed(2)) : prev.fuelFlowLh;
+  // HUD store: live WebSocket telemetry merged over the no-data defaults (which also cover disconnects).
+  const telemetry = useMemo(() => {
+    const ws = wsLiveTelemetry;
+    if (!isConnected || !ws) return INITIAL_TELEMETRY;
+    const rpm = round(ws.rpm, 0);
+    const cht = round(maxOf(ws.cht_c), 1);
+    const egt = round(maxOf(ws.egt_c), 1);
+    const oilP = round(ws.oil_pressure_bar, 2);
+    const oilT = round(ws.oil_temp_c, 1);
+    const vib = round(ws.vibration_rms_g, 3);
+    const fuelLh = round(kgPerSecToLitresPerHour(ws.fuel_flow_kg_s), 2);
+    const mapPa = ws.diagnostics?.map_pa;
+    const mapInHg = isNum(mapPa) ? Number((mapPa / 3386.39).toFixed(1)) : null;
 
-        return {
-          ...prev,
-          ...wsLiveTelemetry,
-          rpm: liveRpm,
-          cht: liveCht,
-          egt: liveEgt,
-          oilPressureBar: liveOilP,
-          oilTempC: liveOilT,
-          fuelFlowLh: liveFuelLh,
-          vibrationRmsG: liveVib,
-          altitude_m: wsLiveTelemetry.altitude_m !== undefined ? wsLiveTelemetry.altitude_m : prev.altitude_m,
-          alternator_v: wsLiveTelemetry.alternator_v !== undefined ? wsLiveTelemetry.alternator_v : prev.alternator_v,
-          craft_crashed: wsLiveTelemetry.craft_crashed !== undefined ? wsLiveTelemetry.craft_crashed : prev.craft_crashed,
-          health_index: wsLiveTelemetry.health_index !== undefined ? wsLiveTelemetry.health_index : prev.health_index,
-          active_faults: wsLiveTelemetry.active_faults || prev.active_faults || [],
-          active_faults_count: wsLiveTelemetry.active_faults_count ?? (wsLiveTelemetry.active_faults?.length || 0),
-          diagnostics: wsLiveTelemetry.diagnostics || prev.diagnostics,
-          cht_c: wsLiveTelemetry.cht_c || prev.cht_c || [liveCht, liveCht, liveCht, liveCht],
-          egt_c: wsLiveTelemetry.egt_c || prev.egt_c || [liveEgt, liveEgt, liveEgt, liveEgt],
-          s2: {
-            ...prev.s2,
-            rpm: liveRpm,
-            cht: liveCht,
-            egt: liveEgt,
-            oilPress: liveOilP,
-            oilTemp: liveOilT,
-            fuelFlow: Number((liveFuelLh).toFixed(1)),
-            vibRms: liveVib,
-          }
-        };
-      });
-    }
+    return {
+      ...INITIAL_TELEMETRY,
+      ...ws,
+      rpm,
+      cht,
+      egt,
+      oilPressureBar: oilP,
+      oilTempC: oilT,
+      fuelFlowLh: fuelLh,
+      vibrationRmsG: vib,
+      manifoldPressureInHg: mapInHg,
+      manifoldPressurePct: isNum(mapPa) ? Math.min(100, (mapPa / MAP_MAX_PA) * 100) : 0,
+      active_faults: ws.active_faults || [],
+      active_faults_count: ws.active_faults_count ?? (ws.active_faults?.length || 0),
+    };
   }, [wsLiveTelemetry, isConnected]);
 
-  // Keyboard Navigation: 1-6 keys for mission control tab switching
+  const telemetryHistory = useTelemetryHistory(telemetry);
+
+  // Keyboard Navigation: 1-4 keys for mission control tab switching
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
-      if (e.key === '1') setActiveTab('simulation');
-      if (e.key === '2') setActiveTab('engine_3d_simulation');
-      if (e.key === '3') setActiveTab('livestats');
-      if (e.key === '4') setActiveTab('livestats_graph');
-      if (e.key === '5') setActiveTab('ideal_real');
-      if (e.key === '6') setActiveTab('health_summary');
+      if (TAB_KEYS[e.key]) setActiveTab(TAB_KEYS[e.key]);
       if (e.key === 'Escape' && activeTab === 'engine_3d_simulation') setActiveTab('simulation');
     };
 
@@ -101,7 +92,6 @@ export default function App() {
                 wsTelemetry={wsLiveTelemetry}
                 isConnected={isConnected}
                 sendCommand={sendCommand}
-                onBack={() => setActiveTab('simulation')}
               />
             )}
 
@@ -112,16 +102,8 @@ export default function App() {
               />
             )}
 
-            {activeTab === 'livestats' && (
-              <ScreenLiveStats telemetry={telemetry} />
-            )}
-
             {activeTab === 'livestats_graph' && (
-              <ScreenLiveStatsAndGraph telemetry={telemetry} />
-            )}
-
-            {activeTab === 'ideal_real' && (
-              <ScreenIdealVsReal telemetry={telemetry} />
+              <ScreenLiveStatsAndGraph telemetry={telemetry} history={telemetryHistory} />
             )}
 
             {activeTab === 'health_summary' && (

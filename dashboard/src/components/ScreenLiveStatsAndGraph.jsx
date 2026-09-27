@@ -1,28 +1,12 @@
 import React, { useRef, useEffect } from 'react';
-import { useTelemetryHistory } from '../hooks/useTelemetryHistory';
-
-/**
- * Maps detected fault categories from SIH-main PhysicsRuleEngine to their corresponding physical engine parameters.
- */
-const FAULT_PARAM_MAP = {
-  misfire: ['egt', 'rpm', 'vibrationRmsG'],
-  injector_abnormal: ['fuelFlowLh', 'egt'],
-  injector_abnormalities: ['fuelFlowLh', 'egt'],
-  cooling_degradation: ['cht', 'oilTempC'],
-  lubrication_issue: ['oilPressureBar', 'oilTempC'],
-  lubrication_issues: ['oilPressureBar', 'oilTempC'],
-  sensor_drift: ['cht', 'egt'],
-  combustion_instability: ['rpm', 'vibrationRmsG'],
-  overheating_trend: ['cht', 'oilTempC'],
-  abnormal_vibration: ['vibrationRmsG'],
-  catastrophic_failure: ['rpm', 'oilPressureBar', 'fuelFlowLh', 'vibrationRmsG', 'cht', 'egt', 'oilTempC'],
-  engine_seizure: ['rpm', 'oilPressureBar', 'fuelFlowLh', 'vibrationRmsG', 'cht', 'egt', 'oilTempC'],
-};
+import { affectedParams } from '../data/faultParams';
+import { fmt, isNum } from '../utils/format';
 
 /**
  * Raw-SVG dual-line chart:
- * - seriesA: IDEAL / nominal baseline (flat reference line)
+ * - seriesA: IDEAL / expected value for the current flight condition
  * - seriesB: ACTUAL / live rolling buffer (diverges visibly on fault detection)
+ * Null samples (no data yet) leave gaps.
  * Auto-scales yMin and yMax from combined data with ~15% padding so the spike is prominently visible.
  */
 function LightLineChart({
@@ -34,7 +18,7 @@ function LightLineChart({
   decimals = 0,
 }) {
   // Auto-scale yMin and yMax with ~15% padding so spikes or drops are clearly accentuated
-  const allVals = [...seriesA, ...seriesB].filter((v) => typeof v === 'number' && !isNaN(v));
+  const allVals = [...seriesA, ...seriesB].filter(isNum);
   let minVal = allVals.length > 0 ? Math.min(...allVals) : 0;
   let maxVal = allVals.length > 0 ? Math.max(...allVals) : 100;
 
@@ -73,8 +57,15 @@ function LightLineChart({
     return padTop + chartH - ((clamped - yMin) / (yMax - yMin)) * chartH;
   };
 
-  const pathA = seriesA.map((val, i) => `${i === 0 ? 'M' : 'L'} ${getX(i)} ${getY(val)}`).join(' ');
-  const pathB = seriesB.map((val, i) => `${i === 0 ? 'M' : 'L'} ${getX(i)} ${getY(val)}`).join(' ');
+  const toPath = (series) => series
+    .map((val, i) => {
+      if (!isNum(val)) return '';
+      const cmd = i === 0 || !isNum(series[i - 1]) ? 'M' : 'L';
+      return `${cmd} ${getX(i)} ${getY(val)}`;
+    })
+    .join(' ');
+  const pathA = toPath(seriesA);
+  const pathB = toPath(seriesB);
 
   // Colors:
   // IDEAL = Clean Emerald / Slate dashed reference line
@@ -82,8 +73,8 @@ function LightLineChart({
   // ACTUAL = Normal Blue when nominal, Vivid Red only when fault is confirmed detected
   const actualColor = isParamFaulted ? '#ef4444' : '#2563eb';
 
-  const currentIdeal = seriesA.length > 0 ? seriesA[seriesA.length - 1] : 0;
-  const currentActual = seriesB.length > 0 ? seriesB[seriesB.length - 1] : 0;
+  const currentIdeal = fmt(seriesA[seriesA.length - 1], decimals);
+  const currentActual = fmt(seriesB[seriesB.length - 1], decimals);
 
   return (
     <div className="s3-chart-box">
@@ -163,7 +154,7 @@ function LightLineChart({
 
         {/* Dots on actual series */}
         {seriesB.map((val, i) => {
-          if (i % 5 === 0 || i === seriesB.length - 1) {
+          if (isNum(val) && (i % 5 === 0 || i === seriesB.length - 1)) {
             return (
               <circle
                 key={`b-${i}`}
@@ -195,7 +186,7 @@ function LightLineChart({
               }}
             />
             <span style={{ color: '#047857', fontWeight: 700 }}>
-              IDEAL (BASELINE): {currentIdeal} {paramUnit}
+              IDEAL (EXPECTED): {currentIdeal} {paramUnit}
             </span>
           </div>
 
@@ -360,31 +351,19 @@ function AtmosphericStressHeatmap({ heatmapData }) {
  * ScreenLiveStatsAndGraph
  * Full 8-card responsive monitoring grid with live dual-line charts for all 7 telemetry parameters
  * plus the atmospheric thermal stress heatmap.
- * Strictly adheres to the rule: "Till the time the fault is not detected, there is no fault indication on the graph.
- * Once detected on the main page, the affected parameter highlights with its real visible spike."
+ * A parameter is highlighted only once the server's diagnosis has detected an anomaly affecting it.
  */
-export function ScreenLiveStatsAndGraph({ telemetry }) {
-  const { params, xLabels } = useTelemetryHistory(telemetry);
+export function ScreenLiveStatsAndGraph({ telemetry, history }) {
+  const { params, xLabels } = history;
   const s3 = telemetry?.s3 || {};
 
-  // EXACT same detection condition as ScreenEngine3DSimulation (the main page)
-  const activeFaults = Array.isArray(telemetry?.active_faults)
-    ? telemetry.active_faults.filter((f) => f && f !== 'none')
-    : [];
   const mlDiag = telemetry?.diagnostics?.ml_diagnostics || {};
-  const isFaultDetected = activeFaults.length > 0 || Boolean(mlDiag.anomaly_detected);
-
-  // Safely extract fault name string whether active_faults contains strings or objects { kind: '...' }
-  const rawFirstFault = activeFaults.length > 0 ? activeFaults[0] : null;
-  const faultName = typeof rawFirstFault === 'string'
-    ? rawFirstFault
-    : (rawFirstFault?.kind || mlDiag.fault_type || 'none');
-  const detectedFault = String(faultName || 'none').toLowerCase();
-
-  // Determine which specific parameters are affected by the detected fault
-  const affectedKeys = isFaultDetected
-    ? FAULT_PARAM_MAP[detectedFault] || ['rpm', 'cht', 'egt', 'oilPressureBar', 'oilTempC', 'fuelFlowLh', 'vibrationRmsG']
-    : [];
+  const isFaultDetected = Boolean(mlDiag.anomaly_detected);
+  const detectedFault = String(mlDiag.fault_type || 'none').toLowerCase();
+  const affectedKeys = isFaultDetected ? affectedParams(detectedFault) : [];
+  const idealSource = telemetry?.expected?.source === 'fleet_baseline'
+    ? 'HEALTHY-FLEET BASELINE FOR CURRENT PHASE, OAT & ALTITUDE'
+    : 'FAULT-FREE PHYSICS TWIN ON CURRENT THROTTLE, ALTITUDE & AMBIENT';
 
   // List of all 7 parameters with display configuration
   const paramOrder = [
@@ -406,13 +385,13 @@ export function ScreenLiveStatsAndGraph({ telemetry }) {
       {/* Centered Tactical Title & Status Eyebrow */}
       <div style={{ textAlign: 'center', marginBottom: '18px' }}>
         <div className="uav-section-eyebrow">
-          REAL-TIME DUAL-LINE TELEMETRY MONITOR // IDEAL BASELINE VS ACTUAL SENSOR STREAM
+          REAL-TIME DUAL-LINE TELEMETRY MONITOR // IDEAL (EXPECTED) VS ACTUAL SENSOR STREAM
         </div>
         <h1 className="uav-screen-title" style={{ margin: '4px 0 6px' }}>
           LIVE STATS AND GRAPH
         </h1>
         <div style={{ fontSize: '11px', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
-          30-SECOND ROLLING WINDOW (T-30s ➔ T-0s) • STREAM FREQUENCY: 1.0 HZ •{' '}
+          IDEAL = {idealSource} • 30-SECOND ROLLING WINDOW • 1.0 HZ •{' '}
           <span style={{ color: isFaultDetected ? '#ef4444' : 'var(--status-green)', fontWeight: 700 }}>
             STATUS:{' '}
             {isFaultDetected
@@ -450,9 +429,9 @@ export function ScreenLiveStatsAndGraph({ telemetry }) {
 
                 <div className="s3-kv-list">
                   <div className="s3-kv-row">
-                    <span className="s3-kv-key">NOMINAL BASELINE :</span>
+                    <span className="s3-kv-key">EXPECTED NOW (IDEAL) :</span>
                     <span className="s3-kv-val" style={{ color: '#10b981' }}>
-                      {p.nominalRange}
+                      {fmt(p.currentIdeal, p.decimals)} {p.unit}
                     </span>
                   </div>
                   <div className="s3-kv-row">
@@ -464,7 +443,7 @@ export function ScreenLiveStatsAndGraph({ telemetry }) {
                         fontWeight: 700,
                       }}
                     >
-                      {p.currentValue} {p.unit}
+                      {fmt(p.currentValue, p.decimals)} {p.unit}
                     </span>
                   </div>
                   <div className="s3-kv-row">
@@ -473,14 +452,14 @@ export function ScreenLiveStatsAndGraph({ telemetry }) {
                       className="s3-kv-val"
                       style={{
                         color:
-                          p.deltaFromIdeal === 0
+                          !p.deltaFromIdeal
                             ? 'var(--text-muted)'
                             : isThisParamFaulted
                             ? '#f97316'
                             : 'var(--status-green)',
                       }}
                     >
-                      {p.deltaFromIdeal > 0 ? `+${p.deltaFromIdeal}` : p.deltaFromIdeal} {p.unit}
+                      {isNum(p.deltaFromIdeal) ? `${p.deltaFromIdeal > 0 ? '+' : ''}${p.deltaFromIdeal.toFixed(p.decimals)}` : '---'} {p.unit}
                     </span>
                   </div>
                   <div className="s3-kv-row">

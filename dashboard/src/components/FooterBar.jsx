@@ -1,4 +1,5 @@
 import React from 'react';
+import { isNum } from '../utils/format';
 
 export function FooterBar({ activeTab, telemetry }) {
   if (activeTab === 'livestats_graph') {
@@ -11,32 +12,20 @@ export function FooterBar({ activeTab, telemetry }) {
     );
   }
 
-  if (activeTab === 'livestats') {
+  if (activeTab === 'health_summary') {
+    const diag = telemetry.diagnostics?.ml_diagnostics;
     return (
       <footer className="uav-footer">
         <div className="uav-footer-left">
-          <span>AIRFRAME: <strong>PREDATOR CLASS UAV</strong> | PROPULSION: <strong style={{ color: 'var(--accent-cyan)' }}>ROTAX 914 F</strong></span>
-        </div>
-        <div className="uav-footer-right">
-          <span>SECURE LINK: <strong style={{ color: 'var(--status-green)' }}>ENCRYPTED (AES-256)</strong></span>
-        </div>
-      </footer>
-    );
-  }
-
-  if (activeTab === 'ideal_real' || activeTab === 'health_summary') {
-    return (
-      <footer className="uav-footer">
-        <div className="uav-footer-left">
-          <span>DIAGNOSTIC ENGINE: <strong style={{ color: '#fff' }}>11 OF 11 SENSORS OPERATIONAL</strong></span>
+          <span>DIAGNOSTIC ENGINE: <strong style={{ color: '#fff' }}>{diag ? 'ONLINE' : 'NO DATA'}</strong></span>
           <span style={{ color: 'var(--border-hairline-bright)' }}>|</span>
-          <span style={{ color: 'var(--status-orange)', fontWeight: 700 }}>
-            1 MINOR VARIANCE DETECTED (VIBRATION HARMONIC)
+          <span style={{ color: diag?.anomaly_detected ? 'var(--status-orange)' : 'var(--status-green)', fontWeight: 700 }}>
+            {diag ? (diag.anomaly_detected ? 'ANOMALY DETECTED' : 'NO ACTIVE ANOMALY') : 'AWAITING TELEMETRY'}
           </span>
         </div>
         <div className="uav-footer-right">
           <span>UAV AIRFRAME: <strong>MQ-9 BLK-5</strong></span>
-          <span>MODE: <strong style={{ color: 'var(--accent-cyan)' }}>{activeTab === 'ideal_real' ? 'DUAL COMPARATOR' : 'HEALTH SUMMARY'}</strong></span>
+          <span>MODE: <strong style={{ color: 'var(--accent-cyan)' }}>HEALTH SUMMARY</strong></span>
         </div>
       </footer>
     );
@@ -48,7 +37,7 @@ export function FooterBar({ activeTab, telemetry }) {
       <div className="uav-footer-left">
         <span className="uav-dot-pulse" style={{ width: 6, height: 6 }} />
         <span>NODE: <strong>{telemetry.nodeId || "GCU-ALPHA-01"}</strong></span>
-        <span>{telemetry.coordinates || "LAT: 34°12'04\"N  LON: 118°28'12\"W  ALT: 18,400 FT MSL"}</span>
+        <span>ALT: {isNum(telemetry.altitude_m) ? `${Math.round(telemetry.altitude_m / 0.3048).toLocaleString()} FT MSL` : '--- FT MSL'}</span>
       </div>
       <div className="uav-footer-right">
         <span>FRAME RATE: <strong>{telemetry.fps || 60} FPS</strong></span>

@@ -3,34 +3,15 @@ import { useGLTF } from '@react-three/drei';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 
-// Realistic Rotax 914F Cylinder Head Temperature (CHT) Color Interpolation
-// Rotax 914 operating range: 80°C - 110°C, Caution: 110°C - 135°C, Redline: 135°C
+const HEAT_COLD = new THREE.Color(0.52, 0.55, 0.60);  // cold / warm-up metal grey
+const HEAT_WARM = new THREE.Color(0.68, 0.66, 0.58);  // hot running metal
+
+// Cylinder metal tint from CHT (75°C cold -> 135°C Rotax redline). Deliberately never amber or red:
+// those colours are reserved for faults the diagnosis has actually detected.
 function computeChtColor(temp) {
-  const t = Number(temp) || 85;
-  if (t <= 75) {
-    return new THREE.Color(0.52, 0.55, 0.60); // Cold / warmup metal grey
-  } else if (t < 105) {
-    // Normal operating temperature (75°C - 105°C): Healthy warm metallic sheen
-    const factor = (t - 75) / 30.0;
-    const cold = new THREE.Color(0.52, 0.55, 0.60);
-    const warm = new THREE.Color(0.68, 0.66, 0.58);
-    return cold.lerp(warm, factor);
-  } else if (t < 120) {
-    // Elevated warming (105°C - 120°C): Visible amber warming
-    const factor = (t - 105) / 15.0;
-    const warm = new THREE.Color(0.68, 0.66, 0.58);
-    const amber = new THREE.Color(0.98, 0.62, 0.10);
-    return warm.lerp(amber, factor);
-  } else if (t < 135) {
-    // High warning (120°C - 135°C): Hot orange to warning red
-    const factor = (t - 120) / 15.0;
-    const amber = new THREE.Color(0.98, 0.62, 0.10);
-    const hotRed = new THREE.Color(0.95, 0.18, 0.12);
-    return amber.lerp(hotRed, factor);
-  } else {
-    // Critical overheat (> 135°C Rotax redline): Pure critical red
-    return new THREE.Color(0.98, 0.08, 0.08);
-  }
+  const t = Number(temp);
+  const factor = Number.isFinite(t) ? Math.min(1, Math.max(0, (t - 75) / 60)) : 0;
+  return HEAT_COLD.clone().lerp(HEAT_WARM, factor);
 }
 
 // Canonical mapping of 0-indexed engine cylinders to 3D CAD mesh nodes in rotax914.glb
@@ -89,6 +70,18 @@ const FAULT_SUBSYSTEM_MAP = {
   sensor_drift: ['Datchik'],
 };
 
+const ALL_CYLINDERS = [0, 1, 2, 3];
+
+/** Cylinders to mark for a detected (not injected) misfire. The recorded misfire moves between
+ *  cylinders row to row, so replay marks every cylinder blamed during the current misfire issue
+ *  instead of hopping to each new row's cylinder. */
+function detectedMisfireCylinders(telemetry, mlDiag) {
+  const issue = telemetry.flight_summary?.issues?.find((i) => i.fault_type === 'misfire' && i.active);
+  if (issue?.cylinders?.length) return issue.cylinders.map((c) => c - 1);
+  const cyl = mlDiag.diagnosed_cylinder;
+  return typeof cyl === 'number' && cyl >= 0 && cyl < 4 ? [cyl] : ALL_CYLINDERS;
+}
+
 export function EngineModel({ telemetry }) {
   // Load model from public folder
   const { scene } = useGLTF('/rotax914.glb');
@@ -143,7 +136,7 @@ export function EngineModel({ telemetry }) {
   }, [scene]);
 
   // 2. Per-frame dynamic highlighting of faulted parts + individual CHT heat coloring
-  useFrame((state) => {
+  useFrame(() => {
     if (!telemetry || !scene) return;
     const meshMap = meshMapRef.current;
     if (!meshMap || Object.keys(meshMap).length === 0) return;
@@ -156,8 +149,8 @@ export function EngineModel({ telemetry }) {
     // Track active developing progress (0.05 to 1.0) for every faulted component
     const highlightedProgressMap = {};
 
-    // 1. Process all active injected faults (supports 1st, 2nd, and multiple simultaneous faults)
-    if (isRunning && activeFaults.length > 0) {
+    // 1. Injected faults are highlighted only once the twin has actually detected them
+    if (isRunning && activeFaults.length > 0 && mlDiag.anomaly_detected) {
       activeFaults.forEach((fault) => {
         const kind = fault.kind;
         const cyl = fault.cylinder;
@@ -198,11 +191,9 @@ export function EngineModel({ telemetry }) {
     } else if (isRunning && mlDiag.anomaly_detected && mlDiag.fault_type && mlDiag.fault_type !== 'none') {
       // Autonomous ML alert (no injected record)
       const kind = mlDiag.fault_type;
-      const cyl = mlDiag.diagnosed_cylinder;
       const partList = [];
       if (kind === 'misfire') {
-        const cIdx = (typeof cyl === 'number' && cyl >= 0 && cyl < 4) ? cyl : 0;
-        CYLINDER_COMPONENTS_MAP[cIdx]?.forEach((p) => partList.push(p));
+        detectedMisfireCylinders(telemetry, mlDiag).forEach((c) => CYLINDER_COMPONENTS_MAP[c]?.forEach((p) => partList.push(p)));
       } else if (FAULT_SUBSYSTEM_MAP[kind]) {
         FAULT_SUBSYSTEM_MAP[kind].forEach((p) => partList.push(p));
       }
@@ -211,12 +202,11 @@ export function EngineModel({ telemetry }) {
       });
     }
 
-    const pulse = 0.5 + 0.5 * Math.sin(state.clock.elapsedTime * 3.0);
     const baseColor = new THREE.Color(0.72, 0.76, 0.82);   // Brushed aluminum metallic
     const amberColor = new THREE.Color(0.98, 0.62, 0.10);  // Caution warming amber
     const redColor = new THREE.Color(0.95, 0.12, 0.15);    // Warning red
 
-    // Helper to compute progressive color & emissive from progress factor (0.05 to 1.0)
+    // Steady progressive colour & glow from the fault's development (0.05 to 1.0): amber -> red, no blinking.
     function computeProgressiveStyle(progress) {
       let matColor;
       if (progress < 0.5) {
@@ -226,19 +216,14 @@ export function EngineModel({ telemetry }) {
         const t = (progress - 0.5) / 0.5;
         matColor = amberColor.clone().lerp(redColor, t);
       }
-      const emissiveColor = new THREE.Color(
-        0.85 * pulse * progress,
-        0.03 * progress,
-        0.05 * progress
-      );
-      const intensity = progress * (0.3 + 0.7 * pulse);
+      const emissiveColor = new THREE.Color(0.85 * progress, 0.03 * progress, 0.05 * progress);
+      const intensity = 0.65 * progress;
       return { matColor, emissiveColor, intensity };
     }
 
     // 1. Color each of the 4 individual cylinders and their heads based on actual CHT
     CYLINDER_COMPONENTS_MAP.forEach((partNames, idx) => {
-      const temp = Number(chtList[idx]) || 85;
-      const chtColor = computeChtColor(temp);
+      const chtColor = computeChtColor(chtList[idx]);
 
       partNames.forEach((partName) => {
         const mesh = meshMap[partName];
@@ -256,17 +241,12 @@ export function EngineModel({ telemetry }) {
             }
           });
         } else {
-          // Individual cylinder temperature coloring
+          // Individual cylinder temperature tint (no fault on this cylinder)
           mats.forEach((mat) => {
             mat.color.copy(chtColor);
             if (mat.emissive) {
-              if (isRunning && temp >= 135) {
-                mat.emissive.setRGB(0.7 * pulse, 0.05, 0.05);
-                mat.emissiveIntensity = 0.6 * pulse;
-              } else {
-                mat.emissive.setRGB(0, 0, 0);
-                mat.emissiveIntensity = 0;
-              }
+              mat.emissive.setRGB(0, 0, 0);
+              mat.emissiveIntensity = 0;
             }
           });
         }

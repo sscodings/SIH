@@ -17,13 +17,13 @@ export function TopBar({ activeTab, setActiveTab, telemetry }) {
     return () => clearInterval(timer);
   }, []);
 
+  const isAnomaly = Boolean(telemetry.diagnostics?.ml_diagnostics?.anomaly_detected);
+
   const tabs = [
     { id: 'simulation', num: '1', label: '1. UAV SCHEMATIC' },
     { id: 'engine_3d_simulation', num: '2', label: '2. 3D DIGITAL TWIN' },
-    { id: 'livestats', num: '3', label: '3. LIVE STATS' },
-    { id: 'livestats_graph', num: '4', label: '4. LIVE STATS & GRAPH' },
-    { id: 'ideal_real', num: '5', label: '5. IDEAL VS REAL' },
-    { id: 'health_summary', num: '6', label: '6. HEALTH SUMMARY' },
+    { id: 'livestats_graph', num: '3', label: '3. LIVE STATS & GRAPH' },
+    { id: 'health_summary', num: '4', label: '4. HEALTH SUMMARY' },
   ];
 
   return (
@@ -32,11 +32,9 @@ export function TopBar({ activeTab, setActiveTab, telemetry }) {
       <div className="uav-topbar-row-1">
         <div className="uav-sys-brand">
           <span className="uav-dot-pulse" />
-          <span>
+          <span className="uav-sys-brand-text">
             {activeTab === 'engine_3d_simulation' ? 'SYS.DIGITAL_TWIN // ROTAX 914F 3D MODEL' :
-             activeTab === 'livestats' ? 'SYS_STATUS: ONLINE  |  UAV-914 ROTAX TURBO' :
              activeTab === 'livestats_graph' ? 'SYS-UAV // TELEMETRY MONITOR' :
-             activeTab === 'ideal_real' ? 'UAV PROPULSION TELEMETRY SUITE // ARCHITECTURE 04' :
              'SYS.TELEMETRY // UAV-914F'}
           </span>
         </div>
@@ -58,13 +56,7 @@ export function TopBar({ activeTab, setActiveTab, telemetry }) {
                 onClick={() => setActiveTab(tab.id)}
                 title={`Press ${tab.num} to switch`}
               >
-                {isActive && (
-                  tab.id === 'health_summary' ? (
-                    <span className="tab-dot-square" />
-                  ) : (
-                    <span className="tab-dot" />
-                  )
-                )}
+                <span className={tab.id === 'health_summary' ? 'tab-dot-square' : 'tab-dot'} />
                 {tab.label}
               </button>
             );
@@ -72,12 +64,16 @@ export function TopBar({ activeTab, setActiveTab, telemetry }) {
         </nav>
 
         {/* Right Corner Telemetry Sync Status */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', fontSize: '11px' }}>
-          {(activeTab === 'ideal_real' || activeTab === 'health_summary') ? (
+        <div className="uav-topbar-side-right">
+          {activeTab === 'health_summary' ? (
             <>
               <span style={{ color: 'var(--text-muted)' }}>SYNC RATE: <strong style={{ color: '#fff' }}>50 Hz</strong></span>
               <span style={{ color: 'var(--text-muted)' }}>FRAME: <strong style={{ color: '#fff' }}>#{frameTick}</strong></span>
-              <span className="uav-badge uav-badge-green">TELEMETRY LOCKED</span>
+              {telemetry.sim_mode ? (
+                <span className="uav-badge uav-badge-green">TELEMETRY LOCKED</span>
+              ) : (
+                <span className="uav-badge uav-badge-orange">NO TELEMETRY</span>
+              )}
             </>
           ) : (
             <span style={{ color: 'var(--text-secondary)', letterSpacing: '0.05em' }}>
@@ -102,19 +98,6 @@ export function TopBar({ activeTab, setActiveTab, telemetry }) {
           </>
         )}
 
-        {activeTab === 'livestats' && (
-          <>
-            <div className="uav-meta-group">
-              <span className="uav-meta-item">AIRFRAME: <span className="uav-meta-val">PREDATOR CLASS UAV</span></span>
-              <span className="uav-meta-item">DOWNLINK: <span className="uav-meta-val-green">STREAM ACTIVE (100 Hz)</span></span>
-            </div>
-            <div className="uav-meta-group">
-              <span className="uav-badge uav-badge-cyan">ARINC 429 BUS</span>
-              <span>UTC {currentTime}</span>
-            </div>
-          </>
-        )}
-
         {activeTab === 'livestats_graph' && (
           <>
             <div className="uav-meta-group">
@@ -127,18 +110,6 @@ export function TopBar({ activeTab, setActiveTab, telemetry }) {
           </>
         )}
 
-        {activeTab === 'ideal_real' && (
-          <>
-            <div className="uav-meta-group">
-              <span className="uav-meta-item">SPEC MODEL: <span className="uav-meta-val">REV 4.8 DIGITAL TWIN</span></span>
-              <span className="uav-meta-item">DOWNLINK: <span className="uav-meta-val-cyan">S-BAND DIRECT // RSSI: -48 DBM</span></span>
-            </div>
-            <div className="uav-meta-group">
-              <span className="uav-meta-val-green">● 11 OF 11 SENSORS SYNCED</span>
-            </div>
-          </>
-        )}
-
         {activeTab === 'health_summary' && (
           <>
             <div className="uav-meta-group">
@@ -147,7 +118,11 @@ export function TopBar({ activeTab, setActiveTab, telemetry }) {
               <span className="uav-meta-item">PREDICTIVE SUITE: <span className="uav-meta-val">CONVERGENCE REV 4.8</span></span>
             </div>
             <div className="uav-meta-group">
-              <span className="uav-badge uav-badge-orange">● 1 ANOMALY ACTIVE</span>
+              {isAnomaly ? (
+                <span className="uav-badge uav-badge-orange">● ANOMALY ACTIVE</span>
+              ) : (
+                <span className="uav-badge uav-badge-green">● NO ACTIVE ANOMALY</span>
+              )}
             </div>
           </>
         )}

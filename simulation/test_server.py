@@ -101,6 +101,65 @@ def run_tests():
         assert len(res.json()["active_faults"]) == 0
         print("  -> PASS: All faults cleared, engine restored to nominal baseline")
 
+        # 8. Test GET /api/missions
+        print("\n[TEST 8] Testing GET /api/missions...")
+        res = client.get("/api/missions")
+        assert res.status_code == 200
+        missions = {m["mission_id"]: m for m in res.json()["missions"]}
+        assert len(missions) == 15, f"Expected 15 recorded missions, got {len(missions)}"
+        assert missions[5]["fault_type"] == "lubrication_issues" and missions[5]["fault_onset_min"] == 345
+        assert missions[13]["fault_type"] == "misfire" and missions[13]["fault_onset_min"] == 268
+        print("  -> PASS: 15 missions listed with labelled faults and onsets")
+
+        # 9. Test mission replay streams the recorded rows with ML diagnosis
+        print("\n[TEST 9] Testing POST /api/control/select_mission (mission 13 replay)...")
+        res = client.post("/api/control/select_mission", json={"mission_id": 13, "speed": 1.0})
+        assert res.status_code == 200
+        assert sim_service.sim_mode == "mission_replay"
+        sim_service.is_running = False  # hold the cursor still while we inspect rows
+        sim_service.replay_cursor_min = 270.0
+        tel = sim_service.get_current_snapshot()
+        row = sim_service.mission_rows[13][270]
+        assert tel["sim_mode"] == "mission_replay" and tel["replay"]["elapsed_min"] == 270
+        assert tel["rpm"] == round(row["RPM"], 1), "Replay must stream the recorded RPM"
+        assert tel["recorded_fault"] == {"kind": "misfire", "active": True, "onset_min": 268}
+        diag = tel["diagnostics"]["ml_diagnostics"]
+        assert diag["ml_layers_available"] and diag["anomaly_detected"] and diag["fault_type"] == "misfire"
+        assert tel["environment"]["humidity_pct"] is not None and tel["expected"]["source"] == "fleet_baseline"
+        json.dumps(tel)
+        print(f"  -> PASS: Replayed min 270 of mission 13: {diag['message'][:70]}")
+
+        # 10. Sandbox-only actions are rejected during replay; select_sandbox returns to cold sandbox
+        print("\n[TEST 10] Testing sandbox-only guards and POST /api/control/select_sandbox...")
+        res = client.post("/api/faults/inject", json={"kind": "misfire", "severity": 0.8})
+        assert res.status_code == 409
+        res = client.post("/api/control/select_sandbox")
+        assert res.status_code == 200 and sim_service.sim_mode == "sandbox" and not sim_service.is_running
+        tel = sim_service.latest_telemetry
+        assert tel["sim_mode"] == "sandbox" and tel["expected"]["source"] == "physics_twin"
+        assert tel["environment"]["humidity_pct"] is None
+        print("  -> PASS: Replay rejects fault injection; sandbox restored cold and paused")
+
+        # 11. Health Summary flight record: whole-flight averages and detected issues
+        print("\n[TEST 11] Testing flight_summary over a full replay of mission 13...")
+        assert tel["flight_summary"]["flight_time_s"] == 0.0 and tel["flight_summary"]["issues"] == []
+        sim_service.select_mission(13, speed=30.0)
+        while sim_service.is_running:
+            sim_service._step_replay()
+        summary = sim_service.latest_telemetry["flight_summary"]
+        rows = sim_service.mission_rows[13]
+        assert summary["complete"] and summary["flight_time_s"] == 535 * 60.0
+        assert summary["stats"]["rpm"]["avg"] == round(sum(r["RPM"] for r in rows) / len(rows))
+        assert summary["stats"]["rpm"]["max"] == round(max(r["RPM"] for r in rows))
+        misfires = [i for i in summary["issues"] if i["fault_type"] == "misfire"]
+        assert len(misfires) == 1 and misfires[0]["first_t_s"] == 268 * 60.0 and misfires[0]["active"]
+        assert summary["health"]["now"] == sim_service.latest_telemetry["health_index"] < 0.8
+        assert summary["recorded_label"]["onset_min"] == 268
+        json.dumps(summary)
+        sim_service.select_sandbox()
+        print(f"  -> PASS: Mission 13 summary: avg RPM {summary['stats']['rpm']['avg']}, "
+              f"misfire issue from min 268, health {summary['health']['start']} -> {summary['health']['now']}")
+
     print("\n=================================================================")
     print(" ALL TESTS PASSED SUCCESSFULLY! ")
     print("=================================================================")

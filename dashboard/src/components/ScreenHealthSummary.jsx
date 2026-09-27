@@ -1,36 +1,221 @@
-import React from 'react';
+import React, { useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
+import { fmt, fmtInt, humanize, isNum } from '../utils/format';
+
+const EXPORT_BG = '#08090c';
+const EXPORT_MARGIN_PX = 32;
+
+// Whole-flight parameters from the server's flight_summary.stats, in dashboard display units.
+const FLIGHT_PARAMS = [
+  { key: 'rpm', label: 'ENGINE SPEED', unit: 'RPM', digits: 0 },
+  { key: 'cht_c', label: 'CHT', note: 'HOTTEST CYL', unit: '°C', digits: 1 },
+  { key: 'egt_c', label: 'EGT', note: 'HOTTEST CYL', unit: '°C', digits: 1 },
+  { key: 'oil_temp_c', label: 'OIL TEMPERATURE', unit: '°C', digits: 1 },
+  { key: 'oil_pressure_bar', label: 'OIL PRESSURE', unit: 'bar', digits: 2 },
+  { key: 'fuel_flow_lh', label: 'FUEL FLOW', unit: 'L/h', digits: 1 },
+  { key: 'vibration_rms_g', label: 'VIBRATION', unit: 'g', digits: 3 },
+  { key: 'altitude_m', label: 'ALTITUDE', unit: 'm', digits: 0 },
+];
+
+// Detection sources in layer order.
+const DETECTOR_NAMES = {
+  physics_rule: 'Physics rules (L1)',
+  ml_classifier: 'AI classifier (L2)',
+  autoencoder: 'Autoencoder (L3)',
+  twin_residual: 'Digital-twin residual',
+};
+
+const pct = (h) => (isNum(h) ? `${(h * 100).toFixed(1)}%` : '---');
+
+function formatClock(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+}
+
+function formatDuration(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h) return `${h} H ${String(m).padStart(2, '0')} MIN`;
+  if (sec) return m ? `${m} MIN ${String(sec).padStart(2, '0')} S` : `${sec} S`;
+  return `${m} MIN`;
+}
+
+/** A point in the flight: recorded minute in replay, T+ clock in the sandbox. */
+const formatInstant = (seconds, replay) => (replay ? `MIN ${Math.round(seconds / 60)}` : `T+ ${formatClock(seconds)}`);
+
+/** What the summary describes, for the PDF header and file name (not shown on screen). */
+function describeSource(telemetry) {
+  if (telemetry?.sim_mode === 'mission_replay' && telemetry.replay) {
+    const r = telemetry.replay;
+    return {
+      text: `MISSION ${r.mission_id} REPLAY · ${humanize(r.mission_type)}`,
+      slug: `mission-${r.mission_id}_min-${r.elapsed_min}`,
+    };
+  }
+  if (telemetry?.sim_mode === 'sandbox') {
+    return {
+      text: 'LIVE SANDBOX',
+      slug: `sandbox_t-${Math.floor(telemetry.t ?? 0)}s`,
+    };
+  }
+  return { text: 'NO TELEMETRY', slug: 'no-telemetry' };
+}
+
+function coverageNote(summary, replay) {
+  if (!summary) return 'AWAITING TELEMETRY';
+  if (!summary.flight_time_s) return 'NO FLIGHT DATA YET';
+  const scope = summary.complete ? (replay ? 'FULL FLIGHT' : 'FLIGHT ENDED') : 'FLIGHT SO FAR';
+  return `${scope} · ${formatDuration(summary.flight_time_s)} · ${fmt(summary.fuel_used_l, 1)} L FUEL USED`;
+}
+
+function IssueRow({ issue, replay, complete }) {
+  let status = 'CLEARED';
+  if (issue.active) status = complete ? (replay ? 'PRESENT AT LANDING' : 'PRESENT AT END') : 'ONGOING';
+  const until = issue.active && !complete ? 'NOW' : formatInstant(issue.last_t_s, replay);
+  const layerOrder = Object.keys(DETECTOR_NAMES);
+  const detectors = [...issue.detected_by]
+    .sort((a, b) => layerOrder.indexOf(a) - layerOrder.indexOf(b))
+    .map((d) => DETECTOR_NAMES[d] || humanize(d))
+    .join(' + ');
+
+  return (
+    <li className={`s5-issue ${issue.active ? 's5-issue-active' : ''}`}>
+      <div className="s5-issue-head">
+        <span className="s5-issue-name">{issue.label}</span>
+        <span className={`uav-badge ${issue.active ? 'uav-badge-orange' : 'uav-badge-green'}`}>{status}</span>
+      </div>
+      <dl className="s5-issue-meta">
+        <div>
+          <dt>DETECTED</dt>
+          <dd>{formatInstant(issue.first_t_s, replay)} – {until}</dd>
+        </div>
+        <div>
+          <dt>FLAGGED FOR</dt>
+          <dd>{formatDuration(issue.flagged_s)}</dd>
+        </div>
+        <div>
+          <dt>DETECTED BY</dt>
+          <dd>{detectors || '---'}</dd>
+        </div>
+        {issue.cylinders.length > 0 && (
+          <div>
+            <dt>{issue.cylinders.length > 1 ? 'CYLINDERS' : 'CYLINDER'}</dt>
+            <dd>{issue.cylinders.join(', ')}</dd>
+          </div>
+        )}
+        <div>
+          <dt>ENGINE HEALTH</dt>
+          <dd>{pct(issue.health_at_onset)} → {pct(issue.health_latest)}</dd>
+        </div>
+      </dl>
+    </li>
+  );
+}
 
 export function ScreenHealthSummary({ telemetry }) {
-  const s5 = telemetry.s5 || {};
-  const liveHealth = telemetry?.health_index !== undefined ? (telemetry.health_index * 100) : (s5.healthScore || 100.0);
-  const score = Number(liveHealth.toFixed(1));
-  const activeFaults = telemetry?.active_faults || [];
-  const hasFault = activeFaults.length > 0 || Boolean(telemetry?.diagnostics?.ml_diagnostics?.anomaly_detected);
+  const pageRef = useRef(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState(null);
+  const [snapshotStamp, setSnapshotStamp] = useState(null);
+
+  const health = telemetry?.health_index;
+  const score = isNum(health) ? health * 100 : null;
+  const diag = telemetry?.diagnostics?.ml_diagnostics;
+  const hasAnomaly = Boolean(diag?.anomaly_detected);
+  const injected = telemetry?.active_faults || [];
+  const source = describeSource(telemetry);
+  const replay = telemetry?.sim_mode === 'mission_replay';
+  const summary = telemetry?.flight_summary ?? null;
+  const complete = Boolean(summary?.complete);
+  const issues = summary?.issues ?? [];
+  const startScore = isNum(summary?.health?.start) ? summary.health.start * 100 : score;
 
   // SVG Circular Gauge Arc Math
   const radius = 100;
   const strokeWidth = 10;
   const circumference = 2 * Math.PI * radius;
-  // Arc starts from top (-90deg), score goes from 0 to 100%
-  const strokeDashoffset = circumference - (score / 100) * circumference;
+  const strokeDashoffset = circumference - ((score ?? 0) / 100) * circumference;
+  const gaugeColor = score === null ? '#475569' : score < 80 ? '#ef4444' : score < 95 ? '#f59e0b' : '#10b981';
+
+  let anomalyText = 'AWAITING TELEMETRY';
+  if (diag) {
+    anomalyText = hasAnomaly ? `ANOMALY DETECTED: ${humanize(diag.fault_type)}` : 'NO ACTIVE ANOMALY';
+    if (injected.length > 0) {
+      anomalyText += ` · INJECTED: ${injected.map((f) => `${humanize(f.kind)} (${Math.round((f.progress ?? 0) * 100)}%)`).join(', ')}`;
+    }
+  }
+
+  const footnotes = [];
+  if (summary?.transient_alerts > 0) {
+    const n = summary.transient_alerts;
+    footnotes.push(`${n} brief alert${n > 1 ? 's' : ''} shorter than ${formatDuration(summary.issue_min_s).toLowerCase()} not counted as ${n > 1 ? 'issues' : 'an issue'}.`);
+  }
+  if (replay && summary?.recorded_label) {
+    const rec = summary.recorded_label;
+    footnotes.push(rec.label
+      ? `Recorded dataset label: ${rec.label} from min ${rec.onset_min}.`
+      : `Recorded dataset label: no fault${complete ? '' : ' so far'}.`);
+  }
+
+  const handleDownload = async () => {
+    setExporting(true);
+    setExportError(null);
+    const now = new Date();
+    const stamp = now.toISOString().replace('T', ' ').slice(0, 19);
+    try {
+      const [{ default: html2canvas }, { jsPDF }] = await Promise.all([import('html2canvas'), import('jspdf')]);
+      flushSync(() => setSnapshotStamp(stamp));
+      const canvas = await html2canvas(pageRef.current, { backgroundColor: EXPORT_BG, scale: 2, logging: false });
+
+      // Page sized to the captured summary (in CSS px) plus a dark margin.
+      const w = canvas.width / 2 + EXPORT_MARGIN_PX * 2;
+      const h = canvas.height / 2 + EXPORT_MARGIN_PX * 2;
+      const pdf = new jsPDF({ orientation: w > h ? 'landscape' : 'portrait', unit: 'px', format: [w, h], hotfixes: ['px_scaling'], compress: true });
+      pdf.setFillColor(EXPORT_BG);
+      pdf.rect(0, 0, w, h, 'F');
+      pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', EXPORT_MARGIN_PX, EXPORT_MARGIN_PX, w - EXPORT_MARGIN_PX * 2, h - EXPORT_MARGIN_PX * 2);
+      pdf.save(`health-summary_${source.slug}_${stamp.replace(/[: ]/g, '-')}.pdf`);
+    } catch (err) {
+      console.error('[ScreenHealthSummary] PDF export failed:', err);
+      setExportError('Download failed — see the browser console for details, then try again.');
+    } finally {
+      setSnapshotStamp(null);
+      setExporting(false);
+    }
+  };
 
   return (
-    <div className="s5-container">
-      {/* Eyebrow & Main Headings */}
-      <div className="uav-section-eyebrow">
-        PREDICTIVE MAINTENANCE SUITE // BENCHMARK REV 4.8 VS SENSOR FEED DOWNLINK
+    <div className="s5-container" ref={pageRef}>
+      <div className="s5-toolbar">
+        {/* Identifies the flight in the exported PDF only; the download button is left out of the capture. */}
+        <span className="s5-export-stamp">
+          {snapshotStamp && <><strong>{source.text}</strong> · EXPORTED <strong>{snapshotStamp} UTC</strong></>}
+        </span>
+        <div className="s5-download" data-html2canvas-ignore="true">
+          {exportError && <span className="s5-download-error">{exportError}</span>}
+          <button type="button" className="s5-download-btn" onClick={handleDownload} disabled={exporting}>
+            {exporting ? 'Preparing PDF…' : 'Download PDF'}
+          </button>
+        </div>
       </div>
-      <h1 className="uav-screen-title" style={{ marginBottom: '8px' }}>
+
+      <div className="uav-section-eyebrow">
+        PREDICTIVE MAINTENANCE SUITE // DIGITAL TWIN VS SENSOR FEED DOWNLINK
+      </div>
+      <h1 className="uav-screen-title uav-screen-title-plain">
         OVERALL HEALTH SUMMARY
       </h1>
-      <div className="uav-section-subtitle">
+      <div className="uav-section-subtitle s5-subtitle">
         DIGITAL TWIN CONVERGENCE & SYSTEM INTEGRITY
       </div>
 
       {/* Centerpiece Circular Health Gauge */}
       <div className="s5-gauge-wrapper">
-        <svg width="240" height="240" viewBox="0 0 240 240" style={{ transform: 'rotate(-90deg)' }}>
-          {/* Background Track (Dotted Dim Arc) */}
+        <svg width="240" height="240" viewBox="0 0 240 240">
+          {/* Rotation is an SVG attribute (not CSS) so the PDF capture renders the arc starting at 12 o'clock. */}
+          <g transform="rotate(-90 120 120)">
           <circle
             cx="120"
             cy="120"
@@ -40,117 +225,104 @@ export function ScreenHealthSummary({ telemetry }) {
             strokeWidth={strokeWidth}
             strokeDasharray="4,4"
           />
-
-          {/* Foreground Active Arc */}
           <circle
             cx="120"
             cy="120"
             r={radius}
             fill="none"
-            stroke={score < 80 ? '#ef4444' : score < 95 ? '#f59e0b' : '#10b981'}
+            stroke={gaugeColor}
             strokeWidth={strokeWidth}
             strokeDasharray={circumference}
             strokeDashoffset={strokeDashoffset}
             strokeLinecap="round"
-            style={{
-              filter: `drop-shadow(0 0 8px ${score < 80 ? 'rgba(239, 68, 68, 0.6)' : score < 95 ? 'rgba(245, 158, 11, 0.6)' : 'rgba(16, 185, 129, 0.6)'})`,
-              transition: 'stroke-dashoffset 0.8s ease'
-            }}
+            style={{ filter: `drop-shadow(0 0 8px ${gaugeColor})`, transition: 'stroke-dashoffset 0.8s ease' }}
           />
+          </g>
         </svg>
 
-        {/* Gauge Inner Text */}
         <div className="s5-gauge-center">
           <div className="s5-gauge-percent">
-            {score}<span className="s5-gauge-percent-unit">%</span>
+            {score === null ? '---' : score.toFixed(1)}<span className="s5-gauge-percent-unit">%</span>
           </div>
           <div className="s5-gauge-caption">
-            OVERALL ENGINE HEALTH SCORE (RUL PROXY)
+            ENGINE HEALTH SCORE<br />(RUL PROXY)
           </div>
         </div>
       </div>
 
       {/* Active Anomaly Pill */}
-      <div className="s5-anomaly-pill">
-        <span className={hasFault ? 'uav-dot-orange' : 'uav-dot-green'} />
-        <span>
-          {hasFault
-            ? (activeFaults.length > 0 
-                ? `${activeFaults.length} ACTIVE FAULT(S): ${activeFaults.map(f => typeof f === 'string' ? f : (f?.kind || 'fault')).join(', ').toUpperCase().replace(/_/g, ' ')}` 
-                : 'ACTIVE ANOMALY DETECTED')
-            : 'ALL SUBSYSTEMS NOMINAL (0 ACTIVE FAULTS)'}
-        </span>
+      <div className={`s5-anomaly-pill ${hasAnomaly ? '' : 's5-anomaly-pill-ok'}`}>
+        <span className={hasAnomaly ? 'uav-dot-orange' : 'uav-dot-green'} />
+        <span>{anomalyText}</span>
       </div>
 
-      {/* 3-Column Statistical Summary */}
+      {/* Health over this flight */}
       <div className="s5-three-col-stats">
         <div className="s5-stat-block">
-          <span className="s5-stat-lbl">IDEAL BASELINE</span>
-          <span className="s5-stat-val">100.0%</span>
+          <span className="s5-stat-lbl">HEALTH AT FLIGHT START</span>
+          <span className="s5-stat-val">{pct(isNum(startScore) ? startScore / 100 : null)}</span>
         </div>
         <div className="s5-stat-block">
-          <span className="s5-stat-lbl">REAL COMPLIANCE</span>
-          <span className={`s5-stat-val ${score < 95 ? 'orange' : 'green'}`}>{score}%</span>
+          <span className="s5-stat-lbl">{complete ? (replay ? 'HEALTH AT LANDING' : 'HEALTH AT END') : 'HEALTH NOW'}</span>
+          <span className={`s5-stat-val ${score !== null && score < 95 ? 'orange' : 'green'}`}>{pct(health)}</span>
         </div>
         <div className="s5-stat-block">
-          <span className="s5-stat-lbl">DELTA VARIANCE</span>
-          <span className="s5-stat-val">{(score - 100.0).toFixed(1)}%</span>
+          <span className="s5-stat-lbl">CHANGE THIS FLIGHT</span>
+          <span className="s5-stat-val">{score === null || !isNum(startScore) ? '---' : `${(score - startScore).toFixed(1)}%`}</span>
         </div>
       </div>
 
-      {/* Highlighted Warning Card */}
-      <div className="s5-warning-card">
-        <div className="s5-warning-left">
-          <div className="s5-warning-title">
-            <span className="uav-dot-orange" />
-            <span>{s5.warning?.name || "VIBRATION SIGNATURE (RMS)"}</span>
-          </div>
-          <span className="s5-warning-sub">
-            {s5.warning?.desc || "Engine Mount Accelerometer #2 // Tri-Axial Node"}
+      {/* Whole-flight parameter averages */}
+      <section className="s5-section">
+        <div className="s5-section-head">
+          <h2 className="s5-section-title">WHOLE-FLIGHT AVERAGES</h2>
+          <span className="s5-section-note">{coverageNote(summary, replay)}</span>
+        </div>
+        <div className="s5-flight-grid">
+          {FLIGHT_PARAMS.map((p) => {
+            const st = summary?.stats?.[p.key];
+            const show = (v) => (p.digits === 0 ? fmtInt(v) : fmt(v, p.digits));
+            return (
+              <div key={p.key} className="s5-flight-stat">
+                <span className="s5-flight-lbl">
+                  AVG {p.label}
+                  {p.note && <span className="s5-flight-lbl-note"> · {p.note}</span>}
+                </span>
+                <span className="s5-flight-val">
+                  {show(st?.avg)} <span className="s5-flight-unit">{p.unit}</span>
+                </span>
+                <span className="s5-flight-range">MIN {show(st?.min)} · MAX {show(st?.max)}</span>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      {/* Issues the diagnosis raised during the flight */}
+      <section className="s5-section">
+        <div className="s5-section-head">
+          <h2 className="s5-section-title">ISSUES DURING FLIGHT</h2>
+          <span className="s5-section-note">
+            {summary ? (issues.length ? `${issues.length} ISSUE${issues.length > 1 ? 'S' : ''}` : 'NONE') : '---'}
           </span>
         </div>
-
-        <div className="s5-warning-right">
-          <div className="s5-compare-item">
-            <span className="s5-compare-lbl">IDEAL BASELINE</span>
-            <span className="s5-compare-val">{s5.warning?.ideal || "< 0.30 g"}</span>
+        {issues.length > 0 ? (
+          <ul className="s5-issue-list">
+            {issues.map((issue) => (
+              <IssueRow key={`${issue.fault_type}-${issue.first_t_s}`} issue={issue} replay={replay} complete={complete} />
+            ))}
+          </ul>
+        ) : (
+          <div className={`s5-issues-empty ${summary ? '' : 's5-issues-nodata'}`}>
+            {summary ? (
+              <><span className="uav-dot-green" /> No issues detected {complete ? 'during this flight' : 'so far'}.</>
+            ) : 'Awaiting telemetry.'}
           </div>
-          <div className="s5-compare-item">
-            <span className="s5-compare-lbl">REAL SENSOR</span>
-            <span className="s5-compare-val orange">{s5.warning?.real || "0.34 g"}</span>
-          </div>
-          <span className="uav-badge uav-badge-orange" style={{ padding: '5px 10px', fontSize: '10.5px' }}>
-            {s5.warning?.chip || "+0.04 g (+13.3%) WARNING"}
-          </span>
-        </div>
-      </div>
-
-      {/* Row of 4 Nominal Status Cards */}
-      <div className="s5-nominal-grid">
-        {s5.nominals?.map((card, idx) => (
-          <div key={idx} className="s5-nom-card">
-            <div className="s5-nom-left">
-              <span className="s5-nom-lbl">{card.label}</span>
-              <span className="s5-nom-val">
-                {card.val} <span>{card.unit}</span>
-              </span>
-            </div>
-            <span className="uav-badge uav-badge-green" style={{ fontSize: '9px', padding: '2px 6px' }}>
-              NOMINAL
-            </span>
-          </div>
+        )}
+        {footnotes.map((note) => (
+          <p key={note} className="s5-footnote">{note}</p>
         ))}
-      </div>
-
-      {/* Diagnosis Bottom Advisory Bar */}
-      <div className="s5-diag-bar">
-        <div className="s5-diag-text">
-          <strong>DIAGNOSIS:</strong> VIBRATION HARMONIC ELEVATION MATCHING AFT MOUNT BUSHING
-        </div>
-        <div className="s5-flight-status">
-          FLIGHT STATUS: ADVISORY / LOW RISK
-        </div>
-      </div>
+      </section>
     </div>
   );
 }

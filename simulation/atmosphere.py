@@ -60,6 +60,20 @@ def isa_troposphere(
     )
 
 
+# Sandbox demo flight plan, in seconds of sim time. Still ~5x time-compressed vs. a real
+# Heron sortie (the recorded missions climb ~2.4 m/s for ~28 min); Mission Replay mode
+# streams the real pacing.
+TAXI_END_S = 20.0
+TAKEOFF_END_S = 40.0
+CLIMB_END_S = 280.0        # 4-min climb to cruise altitude (~12 m/s)
+CRUISE_END_S = 1480.0      # 20-min cruise / surveillance loiter
+DESCENT_END_S = 1720.0     # 4-min descent
+TAKEOFF_ALT_M = 150.0
+CRUISE_ALT_M = 3000.0
+CLIMB_THROTTLE = 0.75       # keeps healthy CHT <= ~117 C over the 4-min climb
+CRUISE_THROTTLE = 0.72
+
+
 class FlightMissionProfile:
     """
     Simulates realistic MALE UAV (Heron / Rotax 914) mission profiles.
@@ -97,42 +111,51 @@ class FlightMissionProfile:
                 self.manual_throttle
             )
 
-        # Accelerated interactive demo mission
-        # 0 - 4s: Idle warmup on runway (alt = 0m)
-        # 4 - 20s: Takeoff roll & initial climb (alt climbs 0 -> 1500m)
-        # 20 - 40s: Climb to cruise altitude (alt climbs 1500 -> 3000m)
-        # 40 - 480s: High-altitude cruise / surveillance loiter (alt = 3000m, speed = 35 m/s)
-        # 480 - 600s: Controlled descent
-        # 600s+: Approach
-        if t < 4.0:
+        if t < TAXI_END_S:
             alt = 0.0
             speed = 5.0
             throttle = 0.20
-        elif t < 20.0:
-            progress = (t - 4.0) / 16.0
-            alt = 1500.0 * progress
+        elif t < TAKEOFF_END_S:
+            progress = (t - TAXI_END_S) / (TAKEOFF_END_S - TAXI_END_S)
+            alt = TAKEOFF_ALT_M * progress
             speed = 10.0 + 25.0 * progress
-            throttle = 0.25 + 0.75 * progress
-        elif t < 40.0:
-            progress = (t - 20.0) / 20.0
-            alt = 1500.0 + 1500.0 * progress
+            throttle = 0.20 + 0.80 * min(1.0, progress / 0.25)
+        elif t < CLIMB_END_S:
+            progress = (t - TAKEOFF_END_S) / (CLIMB_END_S - TAKEOFF_END_S)
+            alt = TAKEOFF_ALT_M + (CRUISE_ALT_M - TAKEOFF_ALT_M) * progress
             speed = 35.0
-            throttle = 0.95
-        elif t < 480.0:
-            alt = 3000.0
+            throttle = CLIMB_THROTTLE
+        elif t < CRUISE_END_S:
+            alt = CRUISE_ALT_M
             speed = 35.0
-            throttle = 0.65
-        elif t < 600.0:
-            progress = (t - 480.0) / 120.0
-            alt = 3000.0 * (1.0 - progress)
+            throttle = CRUISE_THROTTLE
+        elif t < DESCENT_END_S:
+            progress = (t - CRUISE_END_S) / (DESCENT_END_S - CRUISE_END_S)
+            alt = CRUISE_ALT_M * (1.0 - progress)
             speed = 35.0 - 15.0 * progress
-            throttle = 0.65 - 0.50 * progress
+            throttle = CRUISE_THROTTLE - (CRUISE_THROTTLE - 0.25) * progress
         else:
             alt = 0.0
             speed = 15.0
             throttle = 0.20
 
         return (alt, speed, None, throttle)
+
+    def get_phase(self, t: float) -> str:
+        """Mission phase name, using the same labels as the recorded 15-mission dataset."""
+        if self.manual_override:
+            return "Manual_Override"
+        if t < TAXI_END_S:
+            return "Taxi"
+        if t < TAKEOFF_END_S:
+            return "Takeoff"
+        if t < CLIMB_END_S:
+            return "Climb"
+        if t < CRUISE_END_S:
+            return "Cruise_Loiter"
+        if t < DESCENT_END_S:
+            return "Descent"
+        return "Landing"
 
     def ambient_callback(self) -> Callable[[float], Tuple[float, float, Optional[float]]]:
         """Provides the ambient_fn(t) callback required by RotaxDigitalTwin."""

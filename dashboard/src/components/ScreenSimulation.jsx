@@ -1,4 +1,5 @@
 import React from 'react';
+import { fmt, fmtInt } from '../utils/format';
 
 export function ScreenSimulation({ telemetry, onOpenSimulation }) {
   return (
@@ -299,7 +300,7 @@ export function ScreenSimulation({ telemetry, onOpenSimulation }) {
                 <span className="s1-param-desc">(Resolutions per minute)</span>
               </div>
               <div className="s1-param-value">
-                {telemetry.rpm.toLocaleString()} <span className="s1-param-unit">RPM</span>
+                {fmtInt(telemetry.rpm)} <span className="s1-param-unit">RPM</span>
               </div>
             </div>
 
@@ -309,7 +310,7 @@ export function ScreenSimulation({ telemetry, onOpenSimulation }) {
                 <span className="s1-param-desc">(Cylinder Head Temperature)</span>
               </div>
               <div className="s1-param-value">
-                {telemetry.cht} <span className="s1-param-unit">°C</span>
+                {fmt(telemetry.cht, 1)} <span className="s1-param-unit">°C</span>
               </div>
             </div>
 
@@ -319,7 +320,7 @@ export function ScreenSimulation({ telemetry, onOpenSimulation }) {
                 <span className="s1-param-desc">(Exhaust Gas Temperature)</span>
               </div>
               <div className="s1-param-value">
-                {telemetry.egt} <span className="s1-param-unit">°C</span>
+                {fmt(telemetry.egt, 1)} <span className="s1-param-unit">°C</span>
               </div>
             </div>
 
@@ -328,7 +329,7 @@ export function ScreenSimulation({ telemetry, onOpenSimulation }) {
                 <span className="s1-param-label">Oil pressure and Temperature</span>
               </div>
               <div className="s1-param-value">
-                {telemetry.oilPressureBar} <span className="s1-param-unit">bar</span> / {telemetry.oilTempC} <span className="s1-param-unit">°C</span>
+                {fmt(telemetry.oilPressureBar, 2)} <span className="s1-param-unit">bar</span> / {fmt(telemetry.oilTempC, 1)} <span className="s1-param-unit">°C</span>
               </div>
             </div>
 
@@ -337,7 +338,7 @@ export function ScreenSimulation({ telemetry, onOpenSimulation }) {
                 <span className="s1-param-label">Fuel Flow</span>
               </div>
               <div className="s1-param-value">
-                {telemetry.fuelFlowLh} <span className="s1-param-unit">L/h</span>
+                {fmt(telemetry.fuelFlowLh, 1)} <span className="s1-param-unit">L/h</span>
               </div>
             </div>
 
@@ -345,26 +346,26 @@ export function ScreenSimulation({ telemetry, onOpenSimulation }) {
               <div>
                 <span className="s1-param-label">Vibration Signatures</span>
               </div>
-              <div className="s1-param-value green">
-                {telemetry.vibrationRmsG} <span className="s1-param-unit">g [NOM]</span>
+              <div className="s1-param-value">
+                {fmt(telemetry.vibrationRmsG, 3)} <span className="s1-param-unit">g RMS</span>
               </div>
             </div>
 
             <div className="s1-param-row">
               <div>
-                <span className="s1-param-label">Battery and Alternator Health</span>
+                <span className="s1-param-label">Alternator Output</span>
               </div>
               <div className="s1-param-value">
-                {telemetry.batteryVolts} <span className="s1-param-unit">V</span> / {telemetry.batteryHealthPct}%
+                {fmt(telemetry.alternator_v, 2)} <span className="s1-param-unit">V</span>
               </div>
             </div>
 
             <div className="s1-param-row">
               <div>
-                <span className="s1-param-label">Injection Timing Parameters</span>
+                <span className="s1-param-label">Mission Phase</span>
               </div>
               <div className="s1-param-value cyan">
-                {telemetry.injectionTimingBtdc}
+                {telemetry.mission_phase ? telemetry.mission_phase.replace(/_/g, ' ').toUpperCase() : '---'}
               </div>
             </div>
           </div>
@@ -377,7 +378,7 @@ export function ScreenSimulation({ telemetry, onOpenSimulation }) {
             </div>
             <div className="s1-bus-row">
               <span style={{ color: 'var(--text-secondary)' }}>MANIFOLD PRESSURE:</span>
-              <span style={{ color: '#ffffff', fontWeight: 700 }}>{telemetry.manifoldPressureInHg} inHg [TURBO BOOST]</span>
+              <span style={{ color: '#ffffff', fontWeight: 700 }}>{fmt(telemetry.manifoldPressureInHg, 1)} inHg [TURBO BOOST]</span>
             </div>
             <div className="s1-progress-track">
               <div className="s1-progress-fill" style={{ width: `${telemetry.manifoldPressurePct}%` }} />
